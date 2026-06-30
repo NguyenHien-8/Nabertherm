@@ -1,0 +1,12 @@
+../Core/Src/main.c:99:6:Save_Settings_To_Flash	64	static
+../Core/Src/main.c:123:6:Load_Settings_From_Flash	16	static
+../Core/Src/main.c:136:6:HAL_GPIO_EXTI_Callback	24	static
+../Core/Src/main.c:155:6:HAL_TIM_PeriodElapsedCallback	16	static
+../Core/Src/main.c:188:5:main	16	static
+../Core/Src/main.c:245:6:SystemClock_Config	72	static
+../Core/Src/main.c:285:13:MX_I2C1_Init	8	static
+../Core/Src/main.c:319:13:MX_TIM2_Init	32	static
+../Core/Src/main.c:364:13:MX_GPIO_Init	40	static
+../Core/Src/main.c:433:6:Handle_Buttons	24	static
+../Core/Src/main.c:610:6:Update_LCD	64	static
+../Core/Src/main.c:680:6:Error_Handler	4	static,ignoring_inline_asm
