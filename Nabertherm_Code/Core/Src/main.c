@@ -44,7 +44,7 @@ typedef enum {
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-I2C_HandleTypeDef hi2c1;
+I2C_HandleTypeDef hi2c2;
 
 TIM_HandleTypeDef htim2;
 
@@ -53,11 +53,11 @@ TIM_HandleTypeDef htim2;
 volatile uint32_t last_exti_time = 0;
 
 //======= Trạng Thái Nút Nhấn =======//
-volatile uint8_t button_setting = 0;    // PB0 -> Vào Setting HOẶC Chọn con trỏ hh/mm/ss
-volatile uint8_t button_redirect = 0;   // PB1 -> Đổi Sub-mode
-volatile uint8_t button_startstop = 0;  // PA7 -> Lưu và Thoát về Normal Mode
-volatile uint8_t button_tang = 0;       // PB10 -> UP
-volatile uint8_t button_giam = 0;       // PB11 -> DOWN
+volatile uint8_t button_setting = 0;    // PA11 -> Vào Setting HOẶC Chọn con trỏ hh/mm/ss
+volatile uint8_t button_redirect = 0;   // PA12 -> Đổi Sub-mode
+volatile uint8_t button_startstop = 0;  // PA10 -> Lưu và Thoát về Normal Mode
+volatile uint8_t button_tang = 0;       // PA9 -> UP
+volatile uint8_t button_giam = 0;       // PA8 -> DOWN
 
 //======= Biến Quản Lý Hệ Thống =======//
 volatile SystemState current_state = NORMAL_MODE;
@@ -83,8 +83,8 @@ int16_t current_temp = 28;             // Giả lập nhiệt độ môi trườ
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_I2C2_Init(void);
 /* USER CODE BEGIN PFP */
 void Handle_Buttons(void);
 void Update_LCD(void);
@@ -137,15 +137,15 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
   uint32_t current_time = HAL_GetTick();
 
   if ((current_time - last_exti_time) > DEBOUNCE_DELAY) {
-      if (GPIO_Pin == GPIO_PIN_0) {
+      if (GPIO_Pin == GPIO_PIN_11) {
           button_setting = 1;
-      } else if (GPIO_Pin == GPIO_PIN_1) {
+      } else if (GPIO_Pin == GPIO_PIN_15) {
           button_redirect = 1;
-      } else if (GPIO_Pin == GPIO_PIN_7) {
-          button_startstop = 1;
       } else if (GPIO_Pin == GPIO_PIN_10) {
+          button_startstop = 1;
+      } else if (GPIO_Pin == GPIO_PIN_9) {
           button_tang = 1;
-      } else if (GPIO_Pin == GPIO_PIN_11) {
+      } else if (GPIO_Pin == GPIO_PIN_8) {
           button_giam = 1;
       }
       last_exti_time = current_time;
@@ -210,10 +210,10 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_I2C1_Init();
   MX_TIM2_Init();
+  MX_I2C2_Init();
   /* USER CODE BEGIN 2 */
-  LCDI2C_init(&hi2c1, 0x27, 16, 2);
+  LCDI2C_init(&hi2c2, 0x27, 16, 2);
   // Gọi hàm Load dữ liệu từ Flash ngay khi vừa khởi động
   Load_Settings_From_Flash();
   HAL_TIM_Base_Start_IT(&htim2); // Khởi động ngắt Timer 2 (1Hz)
@@ -278,36 +278,36 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief I2C1 Initialization Function
+  * @brief I2C2 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_I2C1_Init(void)
+static void MX_I2C2_Init(void)
 {
 
-  /* USER CODE BEGIN I2C1_Init 0 */
+  /* USER CODE BEGIN I2C2_Init 0 */
 
-  /* USER CODE END I2C1_Init 0 */
+  /* USER CODE END I2C2_Init 0 */
 
-  /* USER CODE BEGIN I2C1_Init 1 */
+  /* USER CODE BEGIN I2C2_Init 1 */
 
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  /* USER CODE END I2C2_Init 1 */
+  hi2c2.Instance = I2C2;
+  hi2c2.Init.ClockSpeed = 100000;
+  hi2c2.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c2.Init.OwnAddress1 = 0;
+  hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c2.Init.OwnAddress2 = 0;
+  hi2c2.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c2.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c2) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C1_Init 2 */
+  /* USER CODE BEGIN I2C2_Init 2 */
 
-  /* USER CODE END I2C1_Init 2 */
+  /* USER CODE END I2C2_Init 2 */
 
 }
 
@@ -370,33 +370,33 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(Max31856_GPIO_Port, Max31856_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : PA1 PA2 PA3 PA4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PA7 */
-  GPIO_InitStruct.Pin = GPIO_PIN_7;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PB0 PB1 PB10 PB11 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_10|GPIO_PIN_11;
+  /*Configure GPIO pin : PB15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_15;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PA8 PA9 PA10 PA11 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : Max31856_Pin */
+  GPIO_InitStruct.Pin = Max31856_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(Max31856_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : PB9 */
   GPIO_InitStruct.Pin = GPIO_PIN_9;
@@ -406,12 +406,6 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI0_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
-
-  HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
-
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
@@ -431,12 +425,12 @@ static uint32_t last_blink_tick = 0;
 static uint8_t blink_toggle = 1;
 
 void Handle_Buttons(void) {
-  // 1. Nút PA7: Lưu & Thoát (nếu ở cài đặt) HOẶC Tạm dừng / Chạy tiếp (nếu ở Normal Mode)
+  // 1. Nút PA10: Lưu & Thoát (nếu ở cài đặt) HOẶC Tạm dừng / Chạy tiếp (nếu ở Normal Mode)
   if (button_startstop) {
       button_startstop = 0;
 
       if (current_state != NORMAL_MODE) {
-          // --- CODE CŨ: Xử lý khi thoát từ các chế độ SETTING về NORMAL_MODE ---
+          // --- Xử lý khi thoát từ các chế độ SETTING về NORMAL_MODE ---
           LCDI2C_clear();
           current_state = NORMAL_MODE;
 
@@ -460,7 +454,7 @@ void Handle_Buttons(void) {
           }
       }
       else {
-          // --- ĐOẠN THÊM MỚI: Xử lý Tạm dừng / Chạy tiếp khi ĐANG Ở NORMAL_MODE ---
+          // --- Xử lý Tạm dừng / Chạy tiếp khi ĐANG Ở NORMAL_MODE ---
           if (is_running == 1) {
               // Nhấn lần 1: Nếu đang chạy -> Tạm dừng thời gian
               is_running = 0;
@@ -484,7 +478,7 @@ void Handle_Buttons(void) {
       return;
   }
 
-  // 2. Nút PB0: Vào Setting Mode HOẶC di chuyển con trỏ chọn phân đoạn
+  // 2. Nút PA11: Vào Setting Mode HOẶC di chuyển con trỏ chọn phân đoạn
   if (button_setting) {
       button_setting = 0;
       if (current_state == NORMAL_MODE) {
@@ -499,7 +493,7 @@ void Handle_Buttons(void) {
       return;
   }
 
-  // Nếu đang ở Normal Mode, vô hiệu hóa các nút còn lại (PB1, PB10, PB11)
+  // Nếu đang ở Normal Mode, vô hiệu hóa các nút còn lại (PB15, PA9, PA8)
   if (current_state == NORMAL_MODE) {
       button_redirect = 0;
       button_tang = 0;
@@ -507,7 +501,7 @@ void Handle_Buttons(void) {
       return;
   }
 
-  // 3. Nút PB1: Chuyển đổi Menu con (SET_TEMP_MODE <-> SET_TIME_MODE)
+  // 3. Nút PB15: Chuyển đổi Menu con (SET_TEMP_MODE <-> SET_TIME_MODE)
   if (button_redirect) {
       button_redirect = 0;
       LCDI2C_clear();
@@ -532,14 +526,14 @@ void Handle_Buttons(void) {
   uint8_t do_down = 0;
   uint16_t step_size = 1;
 
-  // ---- Xử lý Nút Tăng (UP - PB10) ----
+  // ---- Xử lý Nút Tăng (UP - PA9) ----
   if (button_tang) {
       button_tang = 0;
       do_up = 1;
       hold_tick_up = HAL_GetTick();
       fast_tick_up = HAL_GetTick();
   }
-  else if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_10) == GPIO_PIN_SET) {
+  else if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_9) == GPIO_PIN_SET) {
       uint32_t press_duration = HAL_GetTick() - hold_tick_up;
       if (press_duration > HOLD_DELAY_MS) {
           if ((HAL_GetTick() - fast_tick_up) > FAST_SPEED_MS) {
@@ -553,14 +547,14 @@ void Handle_Buttons(void) {
       }
   }
 
-  // ---- Xử lý Nút Giảm (DOWN - PB11) ----
+  // ---- Xử lý Nút Giảm (DOWN - PA8) ----
   if (button_giam) {
       button_giam = 0;
       do_down = 1;
       hold_tick_down = HAL_GetTick();
       fast_tick_down = HAL_GetTick();
   }
-  else if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_11) == GPIO_PIN_SET) {
+  else if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_8) == GPIO_PIN_SET) {
       uint32_t press_duration = HAL_GetTick() - hold_tick_down;
       if (press_duration > HOLD_DELAY_MS) {
           if ((HAL_GetTick() - fast_tick_down) > FAST_SPEED_MS) {
