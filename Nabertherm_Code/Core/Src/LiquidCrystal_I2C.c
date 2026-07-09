@@ -1,6 +1,5 @@
 /*
- * LiquidCrystal_I2C.c
- *
+ * @file LiquidCrystal_I2C.c
  * Author: TRAN NGUYEN HIEN
  * Major: Electronic And Communication Engineering
  */
@@ -52,12 +51,12 @@ void LCDI2C_begin(uint8_t cols, uint8_t rows) {
 
 void LCDI2C_clear() {
   LCDI2C_command(LCD_CLEARDISPLAY);
-  HAL_Delay(2);
+  HAL_Delay(2); // Clear display needs > 1.52ms
 }
 
 void LCDI2C_home() {
   LCDI2C_command(LCD_RETURNHOME);
-  HAL_Delay(2);
+  HAL_Delay(2); // Return home needs > 1.52ms
 }
 
 void LCDI2C_noDisplay() {
@@ -140,6 +139,7 @@ void LCDI2C_createChar(uint8_t location, uint8_t charmap[]) {
   for (int i = 0; i < 8; i++) {
     LCDI2C_write(charmap[i]);
   }
+  LCDI2C_setCursor(0, 0);
 }
 
 void LCDI2C_command(uint8_t value) {
@@ -158,16 +158,38 @@ void LCDI2C_write_String(char* str) {
 
 void LCDI2C_write_Int(int value) {
   char buffer[12];
-  sprintf(buffer, "%d", value);
+  snprintf(buffer, sizeof(buffer), "%d", value);
   LCDI2C_write_String(buffer);
 }
 
 void LCDI2C_write_Float(float value, uint8_t precision) {
-  char buffer[20];
-  char format[10];
-  sprintf(format, "%%.%df", precision);
-  sprintf(buffer, format, value);
-  LCDI2C_write_String(buffer);
+    if (value < 0.0f) {
+        LCDI2C_write('-');
+        value = -value;
+    }
+
+    float rounding = 0.5f;
+    for (uint8_t i = 0; i < precision; ++i) {
+        rounding /= 10.0f;
+    }
+    value += rounding;
+
+    int int_part = (int)value;
+    float frac_part = value - (float)int_part;
+    char buffer[12];
+
+    snprintf(buffer, sizeof(buffer), "%d", int_part);
+    LCDI2C_write_String(buffer);
+
+    if (precision > 0) {
+        LCDI2C_write('.');
+        for (uint8_t i = 0; i < precision; i++) {
+            frac_part *= 10.0f;
+            int digit = (int)frac_part;
+            LCDI2C_write('0' + digit);
+            frac_part -= (float)digit;
+        }
+    }
 }
 
 void LCDI2C_send(uint8_t value, uint8_t mode) {
@@ -189,9 +211,7 @@ void LCDI2C_expanderWrite(uint8_t data) {
 
 void LCDI2C_pulseEnable(uint8_t data) {
   LCDI2C_expanderWrite(data | En);
-  HAL_Delay(1);
   LCDI2C_expanderWrite(data & ~En);
-  HAL_Delay(1);
 }
 
 void LCDI2C_blink_on() { LCDI2C_blink(); }

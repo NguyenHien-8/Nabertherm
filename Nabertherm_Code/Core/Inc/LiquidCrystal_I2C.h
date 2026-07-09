@@ -1,14 +1,12 @@
 /*
- * LiquidCrystal_I2C.h
- *
+ * @file LiquidCrystal_I2C.h
  * Author: TRAN NGUYEN HIEN
  * Major: Electronic And Communication Engineering
  */
 
 #ifndef LIQUIDCRYSTAL_I2C_H
 #define LIQUIDCRYSTAL_I2C_H
-
-#include "stm32f1xx_hal.h"
+#include "main.h"
 #include <stdint.h>
 
 // Commands

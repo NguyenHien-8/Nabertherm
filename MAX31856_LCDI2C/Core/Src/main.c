@@ -48,8 +48,8 @@ I2C_HandleTypeDef hi2c2;
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
-/* Khai báo biến quản lý cảm biến MAX31856 */
 MAX31856_HandleTypeDef hmax31856;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -277,7 +277,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(MAX31856_GPIO_Port, MAX31856_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(MAX31856_GPIO_Port, MAX31856_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : MAX31856_Pin */
   GPIO_InitStruct.Pin = MAX31856_Pin;
