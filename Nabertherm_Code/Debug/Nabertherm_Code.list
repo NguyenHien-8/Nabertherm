@@ -37,11 +37,11 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   CONTENTS, READONLY, DEBUGGING, OCTETS
  16 .debug_macro  00019601  00000000  00000000  0001e1cd  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 17 .debug_line   00013db7  00000000  00000000  000377ce  2**0
+ 17 .debug_line   00013db9  00000000  00000000  000377ce  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 18 .debug_str    0008fc79  00000000  00000000  0004b585  2**0
+ 18 .debug_str    0008fc79  00000000  00000000  0004b587  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 19 .comment      00000043  00000000  00000000  000db1fe  2**0
+ 19 .comment      00000043  00000000  00000000  000db200  2**0
                   CONTENTS, READONLY
  20 .debug_frame  00005d3c  00000000  00000000  000db244  2**2
                   CONTENTS, READONLY, DEBUGGING, OCTETS
@@ -2454,11 +2454,11 @@ float MAX31856_ReadThermocoupleTemperature(MAX31856_HandleTypeDef *dev) {
  8001680:	7fc00000 	.word	0x7fc00000
 
 08001684 <HAL_GPIO_EXTI_Callback>:
-
-/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-//=== NGẮT NÚT NHẤN TỐI ƯU (Độc lập thời gian Debounce cho từng Pin) ===//
+/**
+  * @brief  EXTI Line Interrupt Callback
+  * @note   Implements non-blocking software debounce.
+  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
  8001684:	b580      	push	{r7, lr}
  8001686:	b084      	sub	sp, #16
@@ -2579,7 +2579,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 
 08001770 <HAL_TIM_PeriodElapsedCallback>:
 
-//=== NGẮT TIMER (1Hz) CẬP NHẬT THỜI GIAN THỰC ===//
+/**
+  * @brief  Timer Period Elapsed Callback (1Hz Real-Time Clock)
+  * @note   Only increments time if the system is explicitly in the RUNNING state.
+  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
  8001770:	b480      	push	{r7}
  8001772:	b083      	sub	sp, #12
@@ -2636,12 +2639,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
  80017c8:	701a      	strb	r2, [r3, #0]
                 }
             }
+            // Trigger an LCD refresh every second so the clock UI updates smoothly.
             if (Current_UI_State == UI_STATE_MAIN) {
  80017ca:	4b0a      	ldr	r3, [pc, #40]	@ (80017f4 <HAL_TIM_PeriodElapsedCallback+0x84>)
  80017cc:	781b      	ldrb	r3, [r3, #0]
  80017ce:	2b00      	cmp	r3, #0
  80017d0:	d102      	bne.n	80017d8 <HAL_TIM_PeriodElapsedCallback+0x68>
-                LCD_Needs_Update = true; // Báo cờ cập nhật lại LCD
+                LCD_Needs_Update = true;
  80017d2:	4b09      	ldr	r3, [pc, #36]	@ (80017f8 <HAL_TIM_PeriodElapsedCallback+0x88>)
  80017d4:	2201      	movs	r2, #1
  80017d6:	701a      	strb	r2, [r3, #0]
@@ -2664,12 +2668,19 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 
 080017fc <Process_Buttons>:
 
-//=== HÀM QUẢN LÝ VÀ PHÂN LUỒNG XỬ LÝ NÚT NHẤN ===//
+/**
+  * @brief  Main Event Loop for Button Processing
+  * @note   Decoupled from ISR to keep interrupts brief. Handles all state machine transitions.
+  */
 void Process_Buttons(void) {
  80017fc:	b580      	push	{r7, lr}
  80017fe:	b082      	sub	sp, #8
  8001800:	af00      	add	r7, sp, #0
-    // 1. NÚT SETTING/RUN (PA8)
+
+    // ---------------------------------------------------------
+    // 1. SETTING / RUN BUTTON (PA8)
+    // Acts as the main toggle between Operation and Configuration.
+    // ---------------------------------------------------------
     if (button_setting) {
  8001802:	4b95      	ldr	r3, [pc, #596]	@ (8001a58 <Process_Buttons+0x25c>)
  8001804:	781b      	ldrb	r3, [r3, #0]
@@ -2685,7 +2696,7 @@ void Process_Buttons(void) {
  8001814:	781b      	ldrb	r3, [r3, #0]
  8001816:	2b00      	cmp	r3, #0
  8001818:	d106      	bne.n	8001828 <Process_Buttons+0x2c>
-            // Đang chạy -> Chuyển sang Cài đặt (Tạm dừng)
+            // Enter Settings Mode. Pause operation immediately for safety.
             Current_UI_State = UI_STATE_SET_INTERVAL;
  800181a:	4b90      	ldr	r3, [pc, #576]	@ (8001a5c <Process_Buttons+0x260>)
  800181c:	2201      	movs	r2, #1
@@ -2696,14 +2707,17 @@ void Process_Buttons(void) {
  8001824:	701a      	strb	r2, [r3, #0]
  8001826:	e028      	b.n	800187a <Process_Buttons+0x7e>
         } else {
-            // Đang ở Setting -> Lưu vào Flash và Thoát ra chạy lại từ đầu
-            Save_Settings_To_Flash(); // <==== GHI XUỐNG FLASH KHI THOÁT KHỎI MENU CÀI ĐẶT
+            // Exit Settings Mode.
+            // Critical Step: Save to Non-Volatile Memory on exit.
+            Save_Settings_To_Flash();
  8001828:	f000 fcfc 	bl	8002224 <Save_Settings_To_Flash>
 
             Current_UI_State = UI_STATE_MAIN;
  800182c:	4b8b      	ldr	r3, [pc, #556]	@ (8001a5c <Process_Buttons+0x260>)
  800182e:	2200      	movs	r2, #0
  8001830:	701a      	strb	r2, [r3, #0]
+
+            // Hard reset the timeline to begin a fresh run from Interval 1.
             Run_Hour = 0; Run_Min = 0; Run_Sec = 0;
  8001832:	4b8c      	ldr	r3, [pc, #560]	@ (8001a64 <Process_Buttons+0x268>)
  8001834:	2200      	movs	r2, #0
@@ -2723,7 +2737,7 @@ void Process_Buttons(void) {
  800184c:	2201      	movs	r2, #1
  800184e:	701a      	strb	r2, [r3, #0]
 
-            // Tính toán Target Time cho tiến trình P1 (Ra Giây)
+            // Pre-calculate the first auto-step target threshold in absolute seconds.
             Target_Run_Seconds = Intervals[0].Time_Hour * 3600 +
  8001850:	4b88      	ldr	r3, [pc, #544]	@ (8001a74 <Process_Buttons+0x278>)
  8001852:	791b      	ldrb	r3, [r3, #4]
@@ -2754,9 +2768,11 @@ void Process_Buttons(void) {
  800187a:	4b80      	ldr	r3, [pc, #512]	@ (8001a7c <Process_Buttons+0x280>)
  800187c:	2201      	movs	r2, #1
  800187e:	701a      	strb	r2, [r3, #0]
-    }
 
-    // 2. NÚT REDIRECT (PA9)
+    // ---------------------------------------------------------
+    // 2. REDIRECT BUTTON (PA9)
+    // Handles horizontal navigation (changing items at the same hierarchy level).
+    // ---------------------------------------------------------
     if (button_redirect) {
  8001880:	4b7f      	ldr	r3, [pc, #508]	@ (8001a80 <Process_Buttons+0x284>)
  8001882:	781b      	ldrb	r3, [r3, #0]
@@ -2772,6 +2788,7 @@ void Process_Buttons(void) {
  8001892:	781b      	ldrb	r3, [r3, #0]
  8001894:	2b02      	cmp	r3, #2
  8001896:	d10f      	bne.n	80018b8 <Process_Buttons+0xbc>
+            // Cycle through P1, P2, P3...
             Setting_P_Index++;
  8001898:	4b7a      	ldr	r3, [pc, #488]	@ (8001a84 <Process_Buttons+0x288>)
  800189a:	781b      	ldrb	r3, [r3, #0]
@@ -2795,6 +2812,7 @@ void Process_Buttons(void) {
  80018ba:	781b      	ldrb	r3, [r3, #0]
  80018bc:	2b03      	cmp	r3, #3
  80018be:	d10d      	bne.n	80018dc <Process_Buttons+0xe0>
+            // Move blinking cursor across the 4 digits (Thousands -> Ones).
             Temp_Digit_Index = (Temp_Digit_Index + 1) % 4;
  80018c0:	4b72      	ldr	r3, [pc, #456]	@ (8001a8c <Process_Buttons+0x290>)
  80018c2:	781b      	ldrb	r3, [r3, #0]
@@ -2813,6 +2831,7 @@ void Process_Buttons(void) {
  80018de:	781b      	ldrb	r3, [r3, #0]
  80018e0:	2b04      	cmp	r3, #4
  80018e2:	d10e      	bne.n	8001902 <Process_Buttons+0x106>
+            // Move blinking cursor: HH -> MM -> SS.
             Time_Field_Index = (Time_Field_Index + 1) % 3;
  80018e4:	4b6a      	ldr	r3, [pc, #424]	@ (8001a90 <Process_Buttons+0x294>)
  80018e6:	781b      	ldrb	r3, [r3, #0]
@@ -2833,9 +2852,11 @@ void Process_Buttons(void) {
  8001902:	4b5e      	ldr	r3, [pc, #376]	@ (8001a7c <Process_Buttons+0x280>)
  8001904:	2201      	movs	r2, #1
  8001906:	701a      	strb	r2, [r3, #0]
-    }
 
-    // 3. NÚT SELECT/OK (PB15)
+    // ---------------------------------------------------------
+    // 3. SELECT / OK BUTTON (PB15)
+    // Handles vertical navigation (drilling deeper into menus) and saving edits.
+    // ---------------------------------------------------------
     if (button_select) {
  8001908:	4b63      	ldr	r3, [pc, #396]	@ (8001a98 <Process_Buttons+0x29c>)
  800190a:	781b      	ldrb	r3, [r3, #0]
@@ -2879,7 +2900,7 @@ void Process_Buttons(void) {
  8001952:	781b      	ldrb	r3, [r3, #0]
  8001954:	2b00      	cmp	r3, #0
  8001956:	d112      	bne.n	800197e <Process_Buttons+0x182>
-                    // Đảo Mode
+                    // Direct toggle without needing a sub-menu.
                     Intervals[Setting_P_Index-1].Mode = (Intervals[Setting_P_Index-1].Mode == MODE_MT) ? MODE_TIOT : MODE_MT;
  8001958:	4b4a      	ldr	r3, [pc, #296]	@ (8001a84 <Process_Buttons+0x288>)
  800195a:	781b      	ldrb	r3, [r3, #0]
@@ -2975,6 +2996,7 @@ void Process_Buttons(void) {
                 break;
  80019f2:	e05d      	b.n	8001ab0 <Process_Buttons+0x2b4>
             case UI_STATE_SET_TEMP:
+                // Commit temp buffer back to payload and jump up one level.
                 Intervals[Setting_P_Index-1].Temp = Temp_Edit_Val;
  80019f4:	4b23      	ldr	r3, [pc, #140]	@ (8001a84 <Process_Buttons+0x288>)
  80019f6:	781b      	ldrb	r3, [r3, #0]
@@ -2993,6 +3015,7 @@ void Process_Buttons(void) {
                 break;
  8001a0e:	e050      	b.n	8001ab2 <Process_Buttons+0x2b6>
             case UI_STATE_SET_TIME:
+                // Commit time buffers back to payload and jump up one level.
                 Intervals[Setting_P_Index-1].Time_Hour = Time_Edit_H;
  8001a10:	4b1c      	ldr	r3, [pc, #112]	@ (8001a84 <Process_Buttons+0x288>)
  8001a12:	781b      	ldrb	r3, [r3, #0]
@@ -3064,9 +3087,11 @@ void Process_Buttons(void) {
  8001ab2:	4ba0      	ldr	r3, [pc, #640]	@ (8001d34 <Process_Buttons+0x538>)
  8001ab4:	2201      	movs	r2, #1
  8001ab6:	701a      	strb	r2, [r3, #0]
-    }
 
-    // 4. NÚT TĂNG (PA11) & GIẢM (PA10)
+    // ---------------------------------------------------------
+    // 4. UP (PA11) & DOWN (PA10) BUTTONS
+    // Increments or decrements values and handles list scrolling.
+    // ---------------------------------------------------------
     if (button_tang || button_giam) {
  8001ab8:	4b9f      	ldr	r3, [pc, #636]	@ (8001d38 <Process_Buttons+0x53c>)
  8001aba:	781b      	ldrb	r3, [r3, #0]
@@ -3108,6 +3133,7 @@ void Process_Buttons(void) {
  8001b04:	08001b89 	.word	0x08001b89
  8001b08:	08001cb1 	.word	0x08001cb1
             case UI_STATE_SET_INTERVAL:
+                // Bound limits defined by architecture constraints.
                 if (is_up && Total_Intervals < MAX_INTERVALS) Total_Intervals++;
  8001b0c:	79fb      	ldrb	r3, [r7, #7]
  8001b0e:	2b00      	cmp	r3, #0
@@ -3145,6 +3171,7 @@ void Process_Buttons(void) {
  8001b4c:	e131      	b.n	8001db2 <Process_Buttons+0x5b6>
 
             case UI_STATE_SET_P:
+                // Scroll Menu: Mode (0) <-> Temp (1) <-> Time (2). Wraps around.
                 if (is_up) Menu_Cursor = (Menu_Cursor > 0) ? Menu_Cursor - 1 : 2;
  8001b4e:	79fb      	ldrb	r3, [r7, #7]
  8001b50:	2b00      	cmp	r3, #0
@@ -3181,7 +3208,7 @@ void Process_Buttons(void) {
  8001b86:	e117      	b.n	8001db8 <Process_Buttons+0x5bc>
 
             case UI_STATE_SET_TEMP: {
-                // Tách 4 chữ số để xoay vòng
+                // Break integer into array for single-digit manipulation.
                 uint8_t d[4];
                 d[0] = Temp_Edit_Val / 1000;
  8001b88:	4b70      	ldr	r3, [pc, #448]	@ (8001d4c <Process_Buttons+0x550>)
@@ -3243,6 +3270,7 @@ void Process_Buttons(void) {
  8001bfe:	b2db      	uxtb	r3, r3
  8001c00:	70fb      	strb	r3, [r7, #3]
 
+                // Edit the specifically targeted digit. Wrap 0-9.
                 if (is_up) d[Temp_Digit_Index] = (d[Temp_Digit_Index] == 9) ? 0 : d[Temp_Digit_Index] + 1;
  8001c02:	79fb      	ldrb	r3, [r7, #7]
  8001c04:	2b00      	cmp	r3, #0
@@ -3292,6 +3320,7 @@ void Process_Buttons(void) {
  8001c64:	443b      	add	r3, r7
  8001c66:	f803 2c08 	strb.w	r2, [r3, #-8]
 
+                // Reconstruct integer.
                 Temp_Edit_Val = d[0]*1000 + d[1]*100 + d[2]*10 + d[3];
  8001c6a:	783b      	ldrb	r3, [r7, #0]
  8001c6c:	461a      	mov	r2, r3
@@ -3332,7 +3361,7 @@ void Process_Buttons(void) {
             }
 
             case UI_STATE_SET_TIME: {
-                if (Time_Field_Index == 0) { // Giờ
+                if (Time_Field_Index == 0) {
  8001cb0:	4b2b      	ldr	r3, [pc, #172]	@ (8001d60 <Process_Buttons+0x564>)
  8001cb2:	781b      	ldrb	r3, [r3, #0]
  8001cb4:	2b00      	cmp	r3, #0
@@ -3354,7 +3383,7 @@ void Process_Buttons(void) {
  8001cd2:	4a24      	ldr	r2, [pc, #144]	@ (8001d64 <Process_Buttons+0x568>)
  8001cd4:	7013      	strb	r3, [r2, #0]
                     else Time_Edit_M = (Time_Edit_M == 0) ? 59 : Time_Edit_M - 1;
-                } else if (Time_Field_Index == 2) { // Giây
+                } else if (Time_Field_Index == 2) {
                     if (is_up) Time_Edit_S = (Time_Edit_S == 59) ? 0 : Time_Edit_S + 1;
                     else Time_Edit_S = (Time_Edit_S == 0) ? 59 : Time_Edit_S - 1;
                 }
@@ -3375,7 +3404,7 @@ void Process_Buttons(void) {
  8001cee:	7013      	strb	r3, [r2, #0]
                 break;
  8001cf0:	e061      	b.n	8001db6 <Process_Buttons+0x5ba>
-                } else if (Time_Field_Index == 1) { // Phút
+                } else if (Time_Field_Index == 1) {
  8001cf2:	4b1b      	ldr	r3, [pc, #108]	@ (8001d60 <Process_Buttons+0x564>)
  8001cf4:	781b      	ldrb	r3, [r3, #0]
  8001cf6:	2b01      	cmp	r3, #1
@@ -3427,7 +3456,7 @@ void Process_Buttons(void) {
  8001d60:	20000376 	.word	0x20000376
  8001d64:	2000037a 	.word	0x2000037a
  8001d68:	2000037b 	.word	0x2000037b
-                } else if (Time_Field_Index == 2) { // Giây
+                } else if (Time_Field_Index == 2) {
  8001d6c:	4b16      	ldr	r3, [pc, #88]	@ (8001dc8 <Process_Buttons+0x5cc>)
  8001d6e:	781b      	ldrb	r3, [r3, #0]
  8001d70:	2b02      	cmp	r3, #2
@@ -3491,8 +3520,11 @@ void Process_Buttons(void) {
  8001dd0:	20000003 	.word	0x20000003
 
 08001dd4 <Update_LCD>:
-
-//=== HÀM CẬP NHẬT LCD CHỐNG NHÁY MÀN HÌNH ===//
+  * @brief  Advanced Display Renderer
+  * @note   Implements String Double-Buffering. We assemble the entire row string in RAM,
+  * compare it to what is currently on the screen, and only execute I2C writes
+  * if the string actually changed. This completely eliminates UI flickering.
+  */
 void Update_LCD(void) {
  8001dd4:	b580      	push	{r7, lr}
  8001dd6:	b092      	sub	sp, #72	@ 0x48
@@ -3508,11 +3540,11 @@ void Update_LCD(void) {
  8001dea:	4bbf      	ldr	r3, [pc, #764]	@ (80020e8 <Update_LCD+0x314>)
  8001dec:	2200      	movs	r2, #0
  8001dee:	701a      	strb	r2, [r3, #0]
-    char row1[17];
     char row2[17];
     char temp_buf[21];
 
-    // Xóa bộ đệm mảng (Mặc định lấp khoảng trắng để xóa dư ảnh)
+    // Pre-pad with spaces. This inherently clears any old residual characters
+    // at the end of the line without needing an explicit lcd_clear() command.
     memset(row1, ' ', 16); row1[16] = '\0';
  8001df0:	f107 032c 	add.w	r3, r7, #44	@ 0x2c
  8001df4:	2210      	movs	r2, #16
@@ -3543,6 +3575,8 @@ void Update_LCD(void) {
  8001e34:	08001fc1 	.word	0x08001fc1
  8001e38:	0800200f 	.word	0x0800200f
         case UI_STATE_MAIN:
+            // String Concatenation Fix: Separating "\xDF" (Degree Symbol) from "C"
+            // prevents the GCC compiler from parsing "C" as part of the hex sequence.
             if (System_Run_State == SYS_IDLE) {
  8001e3c:	4bac      	ldr	r3, [pc, #688]	@ (80020f0 <Update_LCD+0x31c>)
  8001e3e:	781b      	ldrb	r3, [r3, #0]
@@ -3683,6 +3717,8 @@ void Update_LCD(void) {
  8001f4e:	f107 032c 	add.w	r3, r7, #44	@ 0x2c
  8001f52:	4618      	mov	r0, r3
  8001f54:	f004 fbfb 	bl	800674e <memcpy>
+
+            // Dynamic render based on Menu_Cursor position.
             if (Menu_Cursor == 0) {
  8001f58:	4b74      	ldr	r3, [pc, #464]	@ (800212c <Update_LCD+0x358>)
  8001f5a:	781b      	ldrb	r3, [r3, #0]
@@ -3821,7 +3857,7 @@ void Update_LCD(void) {
  8002066:	bf00      	nop
     }
 
-    // Chỉ update I2C những dòng có sự thay đổi
+    // Execute I2C write only if the buffered string differs from the cached string.
     if (strcmp(row1, prev_lcd_row1) != 0) {
  8002068:	f107 032c 	add.w	r3, r7, #44	@ 0x2c
  800206c:	493d      	ldr	r1, [pc, #244]	@ (8002164 <Update_LCD+0x390>)
@@ -3867,13 +3903,14 @@ void Update_LCD(void) {
  80020c4:	f004 fb2d 	bl	8006722 <strcpy>
     }
 
-    // Quản lý vị trí con trỏ nhấp nháy bằng LCD Hardware function
+    // Hardware-level cursor blinking.
+    // Calculates absolute column positions based on what field is being edited.
     if (Current_UI_State == UI_STATE_SET_TEMP) {
  80020c8:	4b08      	ldr	r3, [pc, #32]	@ (80020ec <Update_LCD+0x318>)
  80020ca:	781b      	ldrb	r3, [r3, #0]
  80020cc:	2b03      	cmp	r3, #3
  80020ce:	d14f      	bne.n	8002170 <Update_LCD+0x39c>
-        LCDI2C_setCursor(7 + Temp_Digit_Index, 1);
+        LCDI2C_setCursor(7 + Temp_Digit_Index, 1); // "Thres: " is 7 chars
  80020d0:	4b26      	ldr	r3, [pc, #152]	@ (800216c <Update_LCD+0x398>)
  80020d2:	781b      	ldrb	r3, [r3, #0]
  80020d4:	3307      	adds	r3, #7
@@ -3924,6 +3961,7 @@ void Update_LCD(void) {
  8002172:	781b      	ldrb	r3, [r3, #0]
  8002174:	2b04      	cmp	r3, #4
  8002176:	d117      	bne.n	80021a8 <Update_LCD+0x3d4>
+        // "Time: hh:mm:ss" offsets: hr=7, min=10, sec=13
         uint8_t col = (Time_Field_Index == 0) ? 7 : ((Time_Field_Index == 1) ? 10 : 13);
  8002178:	4b10      	ldr	r3, [pc, #64]	@ (80021bc <Update_LCD+0x3e8>)
  800217a:	781b      	ldrb	r3, [r3, #0]
@@ -3964,7 +4002,10 @@ void Update_LCD(void) {
 
 080021c0 <Init_Default_Intervals>:
 
-//=== KHỞI TẠO DỮ LIỆU MẶC ĐỊNH ===//
+/**
+  * @brief  Fallback Initializer
+  * @note   Used when Flash memory is empty (new MCU) or corrupted.
+  */
 void Init_Default_Intervals(void) {
  80021c0:	b480      	push	{r7}
  80021c2:	b083      	sub	sp, #12
@@ -4025,16 +4066,17 @@ void Init_Default_Intervals(void) {
  8002220:	2000031c 	.word	0x2000031c
 
 08002224 <Save_Settings_To_Flash>:
-
-//========================================================
-// HÀM LƯU DỮ LIỆU VÀO FLASH (NON-VOLATILE MEMORY)
-//========================================================
+/**
+  * @brief  Write Parameters to Non-Volatile Flash Memory
+  * @note   Called strictly upon exiting the Setup Menu to prevent flash wear-out.
+  * Max guaranteed erase cycles for STM32F1 is typically 10,000.
+  */
 void Save_Settings_To_Flash(void) {
  8002224:	b5b0      	push	{r4, r5, r7, lr}
  8002226:	b09c      	sub	sp, #112	@ 0x70
  8002228:	af00      	add	r7, sp, #0
     Flash_Data_t flash_data;
-    flash_data.MagicWord = FLASH_MAGIC_WORD;
+    flash_data.MagicWord = FLASH_MAGIC_WORD; // Stamp for validity check.
  800222a:	4b2b      	ldr	r3, [pc, #172]	@ (80022d8 <Save_Settings_To_Flash+0xb4>)
  800222c:	617b      	str	r3, [r7, #20]
     flash_data.TotalIntervals = (uint32_t)Total_Intervals;
@@ -4049,11 +4091,11 @@ void Save_Settings_To_Flash(void) {
  800223e:	4618      	mov	r0, r3
  8002240:	f004 fa85 	bl	800674e <memcpy>
 
-    // Ép kiểu struct sang con trỏ uint32_t để ghi theo từng Word
+    // Pointer casting to allow word-by-word (32-bit) writing logic.
     uint32_t *data_ptr = (uint32_t *)&flash_data;
  8002244:	f107 0314 	add.w	r3, r7, #20
  8002248:	66bb      	str	r3, [r7, #104]	@ 0x68
-    uint16_t num_words = (sizeof(Flash_Data_t) + 3) / 4;
+    uint16_t num_words = (sizeof(Flash_Data_t) + 3) / 4; // Ceiling division
  800224a:	2314      	movs	r3, #20
  800224c:	f8a7 3066 	strh.w	r3, [r7, #102]	@ 0x66
   \details Disables IRQ interrupts by setting the I-bit in the CPSR.
@@ -4065,13 +4107,14 @@ __STATIC_FORCEINLINE void __disable_irq(void)
  8002250:	b672      	cpsid	i
 }
  8002252:	bf00      	nop
-
-    __disable_irq(); // Vô hiệu hóa ngắt (An toàn Flash)
+    // CRITICAL SAFETY: Disable global interrupts.
+    // If a Timer or EXTI fires while the Flash Controller is busy erasing/writing,
+    // the CPU will fetch an instruction from a busy bus, causing a HardFault crash.
+    __disable_irq();
 
     HAL_FLASH_Unlock();
  8002254:	f000 ff02 	bl	800305c <HAL_FLASH_Unlock>
 
-    // Khởi tạo struct phục vụ việc Erase Page
     FLASH_EraseInitTypeDef EraseInitStruct;
     uint32_t PageError = 0;
  8002258:	2300      	movs	r3, #0
@@ -4089,7 +4132,8 @@ __STATIC_FORCEINLINE void __disable_irq(void)
  8002268:	2301      	movs	r3, #1
  800226a:	613b      	str	r3, [r7, #16]
 
-    // Tiến hành Erase Page 63
+    // Erase the page (Flash bits go from 0 to 1).
+    // Writing can only flip 1s to 0s, so Erase is strictly required first.
     if (HAL_FLASHEx_Erase(&EraseInitStruct, &PageError) == HAL_OK) {
  800226c:	463a      	mov	r2, r7
  800226e:	1d3b      	adds	r3, r7, #4
@@ -4099,7 +4143,6 @@ __STATIC_FORCEINLINE void __disable_irq(void)
  8002278:	4603      	mov	r3, r0
  800227a:	2b00      	cmp	r3, #0
  800227c:	d124      	bne.n	80022c8 <Save_Settings_To_Flash+0xa4>
-        // Lặp để ghi từng Word
         for (uint16_t i = 0; i < num_words; i++) {
  800227e:	2300      	movs	r3, #0
  8002280:	f8a7 306e 	strh.w	r3, [r7, #110]	@ 0x6e
@@ -4140,7 +4183,8 @@ __STATIC_FORCEINLINE void __disable_irq(void)
 }
  80022ce:	bf00      	nop
 
-    __enable_irq(); // Bật lại ngắt
+    // Re-enable interrupts to resume normal background operations.
+    __enable_irq();
 }
  80022d0:	bf00      	nop
  80022d2:	3770      	adds	r7, #112	@ 0x70
@@ -4153,19 +4197,20 @@ __STATIC_FORCEINLINE void __disable_irq(void)
 
 080022e8 <Load_Settings_From_Flash>:
 
-//========================================================
-// HÀM TẢI DỮ LIỆU TỪ FLASH (NON-VOLATILE MEMORY)
-//========================================================
+/**
+  * @brief  Read Parameters from Non-Volatile Flash Memory
+  * @note   Called ONCE during boot sequence. Maps flash data straight to RAM.
+  */
 void Load_Settings_From_Flash(void) {
  80022e8:	b580      	push	{r7, lr}
  80022ea:	b082      	sub	sp, #8
  80022ec:	af00      	add	r7, sp, #0
-    // Trỏ thẳng cấu trúc vào địa chỉ Flash để đọc
+    // Treat the Flash address as a pointer to our struct type.
     Flash_Data_t *flash_data = (Flash_Data_t *)FLASH_STORAGE_ADDR;
  80022ee:	4b12      	ldr	r3, [pc, #72]	@ (8002338 <Load_Settings_From_Flash+0x50>)
  80022f0:	607b      	str	r3, [r7, #4]
 
-    // Kiểm tra Magic Word để phân biệt Flash đã ghi hay Flash rỗng/Lỗi
+    // If Magic Word is present, the memory has been explicitly written by our firmware before.
     if (flash_data->MagicWord == FLASH_MAGIC_WORD) {
  80022f2:	687b      	ldr	r3, [r7, #4]
  80022f4:	681b      	ldr	r3, [r3, #0]
@@ -4179,7 +4224,7 @@ void Load_Settings_From_Flash(void) {
  8002302:	4b0f      	ldr	r3, [pc, #60]	@ (8002340 <Load_Settings_From_Flash+0x58>)
  8002304:	701a      	strb	r2, [r3, #0]
 
-        // Ràng buộc giới hạn đề phòng rủi ro dữ liệu sai sót
+        // Boundary constraint defense against potential bit-rot or bad pointers.
         if (Total_Intervals == 0 || Total_Intervals > MAX_INTERVALS) {
  8002306:	4b0e      	ldr	r3, [pc, #56]	@ (8002340 <Load_Settings_From_Flash+0x58>)
  8002308:	781b      	ldrb	r3, [r3, #0]
@@ -4195,7 +4240,7 @@ void Load_Settings_From_Flash(void) {
  800231a:	701a      	strb	r2, [r3, #0]
         }
 
-        // Copy mảng Settings
+        // Deep copy from Flash into RAM execution variables.
         memcpy(Intervals, flash_data->Intervals, sizeof(Intervals));
  800231c:	687b      	ldr	r3, [r7, #4]
  800231e:	3308      	adds	r3, #8
@@ -4204,7 +4249,7 @@ void Load_Settings_From_Flash(void) {
  8002324:	4807      	ldr	r0, [pc, #28]	@ (8002344 <Load_Settings_From_Flash+0x5c>)
  8002326:	f004 fa12 	bl	800674e <memcpy>
     } else {
-        // Không khớp -> Nạp giá trị mặc định cho MCU mới tinh
+        // Factory default behavior.
         Init_Default_Intervals();
     }
 }
@@ -4259,10 +4304,8 @@ int main(void)
   MX_SPI1_Init();
  8002362:	f000 f931 	bl	80025c8 <MX_SPI1_Init>
   /* USER CODE BEGIN 2 */
-
-  //==== TẢI DỮ LIỆU TỪ FLASH VÀO RAM KHI KHỞI ĐỘNG ====//
-  // Nếu có dữ liệu hợp lệ, tự động nạp. Nếu rỗng, nạp mặc định.
-  Load_Settings_From_Flash();
+  // Load persistence data into RAM *before* starting any operation logic.
+    Load_Settings_From_Flash();
  8002366:	f7ff ffbf 	bl	80022e8 <Load_Settings_From_Flash>
 
   //====== Init LCD16x2 I2C ======//
@@ -4301,11 +4344,11 @@ int main(void)
  80023a2:	2102      	movs	r1, #2
  80023a4:	4841      	ldr	r0, [pc, #260]	@ (80024ac <main+0x164>)
  80023a6:	f7ff f877 	bl	8001498 <MAX31856_SetConversionMode>
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-  while (1)
   {
-	  // 1. NON-BLOCKING: Đọc nhiệt độ từ cảm biến mỗi 500ms
+	  // -------------------------------------------------------------------
+      // 1. ASYNCHRONOUS POLLING: Temp Sensor Read
+      // Uses the Systick (HAL_GetTick) to run every 500ms without blocking.
+      // -------------------------------------------------------------------
       if (HAL_GetTick() - last_temp_read_time >= 500) {
  80023aa:	f000 fcab 	bl	8002d04 <HAL_GetTick>
  80023ae:	4602      	mov	r2, r0
@@ -4325,28 +4368,34 @@ int main(void)
  80023cc:	4603      	mov	r3, r0
  80023ce:	4a39      	ldr	r2, [pc, #228]	@ (80024b4 <main+0x16c>)
  80023d0:	6013      	str	r3, [r2, #0]
+
+          // Request a UI redraw only if we are actively viewing the temp.
           if (Current_UI_State == UI_STATE_MAIN) {
  80023d2:	4b39      	ldr	r3, [pc, #228]	@ (80024b8 <main+0x170>)
  80023d4:	781b      	ldrb	r3, [r3, #0]
  80023d6:	2b00      	cmp	r3, #0
  80023d8:	d102      	bne.n	80023e0 <main+0x98>
-              LCD_Needs_Update = true; // Báo cập nhật nhiệt độ
+              LCD_Needs_Update = true;
  80023da:	4b38      	ldr	r3, [pc, #224]	@ (80024bc <main+0x174>)
  80023dc:	2201      	movs	r2, #1
  80023de:	701a      	strb	r2, [r3, #0]
-          }
-      }
 
-      // 2. Xử lý Nút nhấn (Flags nhận được từ EXTI Callback)
+      // ---------------------------------------------------------
+      // 2. DISPATCHER: Input Handling
+      // Executes logic triggered by the EXTI ISR flags.
+      // ---------------------------------------------------------
       Process_Buttons();
  80023e0:	f7ff fa0c 	bl	80017fc <Process_Buttons>
 
-      // 3. LOGIC AUTO-STEP (Cộng dồn mốc thời gian không reset)
+      // ---------------------------------------------------------
+      // 3. AUTO-STEP LOGIC: Cumulative Timeline
+      // ---------------------------------------------------------
       if (System_Run_State == SYS_RUNNING) {
  80023e4:	4b36      	ldr	r3, [pc, #216]	@ (80024c0 <main+0x178>)
  80023e6:	781b      	ldrb	r3, [r3, #0]
  80023e8:	2b01      	cmp	r3, #1
  80023ea:	d154      	bne.n	8002496 <main+0x14e>
+          // Convert elapsed time since start into absolute seconds.
           uint32_t current_run_seconds = Run_Hour * 3600 + Run_Min * 60 + Run_Sec;
  80023ec:	4b35      	ldr	r3, [pc, #212]	@ (80024c4 <main+0x17c>)
  80023ee:	781b      	ldrb	r3, [r3, #0]
@@ -4366,6 +4415,7 @@ int main(void)
  800240e:	4413      	add	r3, r2
  8002410:	607b      	str	r3, [r7, #4]
 
+          // If elapsed time has crossed the calculated threshold for the current interval...
           if (current_run_seconds >= Target_Run_Seconds) {
  8002412:	4b2f      	ldr	r3, [pc, #188]	@ (80024d0 <main+0x188>)
  8002414:	681b      	ldr	r3, [r3, #0]
@@ -4379,7 +4429,7 @@ int main(void)
  8002422:	781b      	ldrb	r3, [r3, #0]
  8002424:	429a      	cmp	r2, r3
  8002426:	d230      	bcs.n	800248a <main+0x142>
-                  // Chuyển sang tiến trình P tiếp theo
+                  // Move to the next segment.
                   Current_Interval++;
  8002428:	4b2a      	ldr	r3, [pc, #168]	@ (80024d4 <main+0x18c>)
  800242a:	781b      	ldrb	r3, [r3, #0]
@@ -4387,7 +4437,9 @@ int main(void)
  800242e:	b2da      	uxtb	r2, r3
  8002430:	4b28      	ldr	r3, [pc, #160]	@ (80024d4 <main+0x18c>)
  8002432:	701a      	strb	r2, [r3, #0]
-                  // Cộng dồn mốc đích (Target) với thời gian của tiến trình mới
+
+                  // Calculate new threshold dynamically by adding the upcoming segment's duration.
+                  // This maintains clock continuity.
                   Target_Run_Seconds += (Intervals[Current_Interval-1].Time_Hour * 3600 +
  8002434:	4b27      	ldr	r3, [pc, #156]	@ (80024d4 <main+0x18c>)
  8002436:	781b      	ldrb	r3, [r3, #0]
@@ -4437,7 +4489,7 @@ int main(void)
  8002486:	701a      	strb	r2, [r3, #0]
  8002488:	e005      	b.n	8002496 <main+0x14e>
               } else {
-                  // Đã hoàn tất tất cả tiến trình
+                  // No more segments left in the queue.
                   System_Run_State = SYS_COMPLETED;
  800248a:	4b0d      	ldr	r3, [pc, #52]	@ (80024c0 <main+0x178>)
  800248c:	2202      	movs	r2, #2
@@ -4446,11 +4498,11 @@ int main(void)
  8002490:	4b0a      	ldr	r3, [pc, #40]	@ (80024bc <main+0x174>)
  8002492:	2201      	movs	r2, #1
  8002494:	701a      	strb	r2, [r3, #0]
-              }
-          }
-      }
 
-      // 4. Update LCD dựa theo Flag
+      // ----------------------------------------------------------------------------------
+      // 4. DISPATCHER: UI Renderer
+      // Repaints the LCD if and only if LCD_Needs_Update flag was raised by other modules.
+      // ----------------------------------------------------------------------------------
       Update_LCD();
  8002496:	f7ff fc9d 	bl	8001dd4 <Update_LCD>
       if (HAL_GetTick() - last_temp_read_time >= 500) {

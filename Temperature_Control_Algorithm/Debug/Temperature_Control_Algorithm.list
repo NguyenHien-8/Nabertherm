@@ -3409,7 +3409,7 @@ int main(void)
  8001ce4:	f7ff fc0c 	bl	8001500 <MAX31856_SetConversionMode>
 
   // 3. Khởi tạo bộ PID
-    Setpoint = 60.0f; // Nhiệt độ cài đặt mục tiêu
+    Setpoint = 50.0f; // Nhiệt độ cài đặt mục tiêu
  8001ce8:	4b6a      	ldr	r3, [pc, #424]	@ (8001e94 <main+0x200>)
  8001cea:	4a6b      	ldr	r2, [pc, #428]	@ (8001e98 <main+0x204>)
  8001cec:	601a      	str	r2, [r3, #0]
@@ -3652,7 +3652,7 @@ int main(void)
  8001e8c:	20000264 	.word	0x20000264
  8001e90:	200002bc 	.word	0x200002bc
  8001e94:	20000310 	.word	0x20000310
- 8001e98:	42700000 	.word	0x42700000
+ 8001e98:	42480000 	.word	0x42480000
  8001e9c:	20000000 	.word	0x20000000
  8001ea0:	20000004 	.word	0x20000004
  8001ea4:	20000008 	.word	0x20000008
@@ -4126,8 +4126,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
  80021b6:	2300      	movs	r3, #0
  80021b8:	61bb      	str	r3, [r7, #24]
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
- 80021ba:	2303      	movs	r3, #3
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+ 80021ba:	2302      	movs	r3, #2
  80021bc:	61fb      	str	r3, [r7, #28]
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
  80021be:	f107 0310 	add.w	r3, r7, #16
