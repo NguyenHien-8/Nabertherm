@@ -51,12 +51,19 @@ typedef struct {
     uint8_t Time_Min;
     uint8_t Time_Sec;
 } Interval_TypeDef;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define DEBOUNCE_DELAY 200
 #define MAX_INTERVALS 9
+
+// ====================================================
+// Flash Storage Architecture (Page 63 của 64KB Flash)
+// ====================================================
+#define FLASH_STORAGE_ADDR 0x0800FC00
+#define FLASH_MAGIC_WORD   0xAABBCCDD
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -66,11 +73,22 @@ typedef struct {
 
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c2;
+
 SPI_HandleTypeDef hspi1;
+
 TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
 MAX31856_HandleTypeDef max31856;
+
+// ====================================================
+// Cấu trúc gom dữ liệu để lưu vào Flash
+// ====================================================
+typedef struct {
+    uint32_t MagicWord;
+    uint32_t TotalIntervals;
+    Interval_TypeDef Intervals[MAX_INTERVALS];
+} Flash_Data_t;
 
 //========== Multi-Pin Independent Debounce Variables ==========//
 volatile uint32_t last_time_PA8 = 0;
@@ -126,10 +144,13 @@ static void MX_SPI1_Init(void);
 void Update_LCD(void);
 void Process_Buttons(void);
 void Init_Default_Intervals(void);
+void Save_Settings_To_Flash(void);
+void Load_Settings_From_Flash(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
 //=== NGẮT NÚT NHẤN TỐI ƯU (Độc lập thời gian Debounce cho từng Pin) ===//
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     uint32_t current_time = HAL_GetTick();
@@ -177,7 +198,9 @@ void Process_Buttons(void) {
             Current_UI_State = UI_STATE_SET_INTERVAL;
             System_Run_State = SYS_IDLE;
         } else {
-            // Đang ở Setting -> Lưu và Thoát ra chạy lại từ đầu
+            // Đang ở Setting -> Lưu vào Flash và Thoát ra chạy lại từ đầu
+            Save_Settings_To_Flash(); // <==== GHI XUỐNG FLASH KHI THOÁT KHỎI MENU CÀI ĐẶT
+
             Current_UI_State = UI_STATE_MAIN;
             Run_Hour = 0; Run_Min = 0; Run_Sec = 0;
             Current_Interval = 1;
@@ -394,6 +417,68 @@ void Init_Default_Intervals(void) {
     }
 }
 
+//========================================================
+// HÀM LƯU DỮ LIỆU VÀO FLASH (NON-VOLATILE MEMORY)
+//========================================================
+void Save_Settings_To_Flash(void) {
+    Flash_Data_t flash_data;
+    flash_data.MagicWord = FLASH_MAGIC_WORD;
+    flash_data.TotalIntervals = (uint32_t)Total_Intervals;
+    memcpy(flash_data.Intervals, Intervals, sizeof(Intervals));
+
+    // Ép kiểu struct sang con trỏ uint32_t để ghi theo từng Word
+    uint32_t *data_ptr = (uint32_t *)&flash_data;
+    uint16_t num_words = (sizeof(Flash_Data_t) + 3) / 4;
+
+    __disable_irq(); // Vô hiệu hóa ngắt (An toàn Flash)
+
+    HAL_FLASH_Unlock();
+
+    // Khởi tạo struct phục vụ việc Erase Page
+    FLASH_EraseInitTypeDef EraseInitStruct;
+    uint32_t PageError = 0;
+    EraseInitStruct.TypeErase = FLASH_TYPEERASE_PAGES;
+    EraseInitStruct.Banks = FLASH_BANK_1;
+    EraseInitStruct.PageAddress = FLASH_STORAGE_ADDR;
+    EraseInitStruct.NbPages = 1;
+
+    // Tiến hành Erase Page 63
+    if (HAL_FLASHEx_Erase(&EraseInitStruct, &PageError) == HAL_OK) {
+        // Lặp để ghi từng Word
+        for (uint16_t i = 0; i < num_words; i++) {
+            HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, FLASH_STORAGE_ADDR + (i * 4), data_ptr[i]);
+        }
+    }
+
+    HAL_FLASH_Lock();
+
+    __enable_irq(); // Bật lại ngắt
+}
+
+//========================================================
+// HÀM TẢI DỮ LIỆU TỪ FLASH (NON-VOLATILE MEMORY)
+//========================================================
+void Load_Settings_From_Flash(void) {
+    // Trỏ thẳng cấu trúc vào địa chỉ Flash để đọc
+    Flash_Data_t *flash_data = (Flash_Data_t *)FLASH_STORAGE_ADDR;
+
+    // Kiểm tra Magic Word để phân biệt Flash đã ghi hay Flash rỗng/Lỗi
+    if (flash_data->MagicWord == FLASH_MAGIC_WORD) {
+        Total_Intervals = (uint8_t)flash_data->TotalIntervals;
+
+        // Ràng buộc giới hạn đề phòng rủi ro dữ liệu sai sót
+        if (Total_Intervals == 0 || Total_Intervals > MAX_INTERVALS) {
+            Total_Intervals = 1;
+        }
+
+        // Copy mảng Settings
+        memcpy(Intervals, flash_data->Intervals, sizeof(Intervals));
+    } else {
+        // Không khớp -> Nạp giá trị mặc định cho MCU mới tinh
+        Init_Default_Intervals();
+    }
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -429,8 +514,10 @@ int main(void)
   MX_I2C2_Init();
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
-  // Khởi tạo struct dữ liệu
-    Init_Default_Intervals();
+
+  //==== TẢI DỮ LIỆU TỪ FLASH VÀO RAM KHI KHỞI ĐỘNG ====//
+  // Nếu có dữ liệu hợp lệ, tự động nạp. Nếu rỗng, nạp mặc định.
+  Load_Settings_From_Flash();
 
   //====== Init LCD16x2 I2C ======//
     LCDI2C_init(&hi2c2, 0x27, 16, 2);
@@ -671,7 +758,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : PB15 */
   GPIO_InitStruct.Pin = GPIO_PIN_15;
@@ -692,8 +779,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_9;
+  /*Configure GPIO pin : PB7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -732,7 +819,7 @@ void Error_Handler(void)
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
+  * where the assert_param error has occurred.
   * @param  file: pointer to the source file name
   * @param  line: assert_param error line source number
   * @retval None
