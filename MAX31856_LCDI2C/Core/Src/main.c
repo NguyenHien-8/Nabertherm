@@ -24,7 +24,7 @@
 #include "LiquidCrystal_I2C.h"
 #include "MAX31856.h"
 #include <stdio.h>
-#include <math.h> // Hỗ trợ kiểm tra giá trị NAN
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,6 +50,13 @@ SPI_HandleTypeDef hspi1;
 /* USER CODE BEGIN PV */
 MAX31856_HandleTypeDef hmax31856;
 
+// Khai báo các biến quản lý thời gian lập lịch (Scheduling)
+uint32_t last_temp_read_time = 0;
+uint32_t last_lcd_update_time = 0;
+
+// Khai báo biến lưu trữ dữ liệu toàn cục
+float temp_current = 0.0f;
+uint8_t fault_status = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -100,6 +107,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   // 1. Init LCD 16x2
     LCDI2C_init(&hi2c2, 0x27, 16, 2);
+    LCDI2C_backlight();
     LCDI2C_setCursor(0, 0);
     LCDI2C_printstr("=== MAX31856 ===");
 
@@ -107,40 +115,66 @@ int main(void)
     MAX31856_Init(&hmax31856, &hspi1, GPIOA, GPIO_PIN_15);
 
   // 3. Configuration type can nhiet K
+    MAX31856_SetConversionMode(&hmax31856, MAX31856_CONTINUOUS);
     MAX31856_SetThermocoupleType(&hmax31856, MAX31856_TCTYPE_K);
+    MAX31856_SetNoiseFilter(&hmax31856, MAX31856_NOISE_FILTER_50HZ);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+    char lcd_buffer[17];
   while (1)
   {
-  // Check for hardware error
-	  uint8_t fault = MAX31856_ReadFault(&hmax31856);
-	  LCDI2C_setCursor(0, 1);
-      if (fault != 0) {
-          // Open Circuit ERROR
-          if (fault & MAX31856_FAULT_OPEN) {
-              LCDI2C_printstr("Fault: OpenWire ");
-          }
-          // Other ERROR
-          else {
-              LCDI2C_printstr("Fault: Hardware ");
-          }
-      }
-      else {
-          float temp = MAX31856_ReadThermocoupleTemperature(&hmax31856);
-          if (temp > -200.0f && temp < 1300.0f) {
-        	  LCDI2C_setCursor(0, 1);
-              LCDI2C_printstr("Temp:       C   ");
-              LCDI2C_setCursor(6, 1);
-              LCDI2C_write_Float(temp, 2);
+	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+	  // Lấy thời gian hiện tại của hệ thống (đơn vị mili-giây)
+	        uint32_t current_tick = HAL_GetTick();
 
-          } else {
-              LCDI2C_printstr("Out of Range!   ");
-          }
-      }
+	        /* =========================================================
+	         * TÁC VỤ 1: ĐỌC CẢM BIẾN TỐC ĐỘ CAO (Chu kỳ 100ms)
+	         * Ở chế độ Continuous, lệnh đọc SPI tốn chưa tới 1ms
+	         * ========================================================= */
+	        if (current_tick - last_temp_read_time >= 100)
+	        {
+	            last_temp_read_time = current_tick;
 
-	  HAL_Delay(100);
+	            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET); // Debug pin ON
+
+	            temp_current = MAX31856_ReadThermocoupleTemperature(&hmax31856);
+	            fault_status = MAX31856_ReadFault(&hmax31856);
+
+	            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // Debug pin OFF
+	        }
+
+	        /* =========================================================
+	         * TÁC VỤ 2: CẬP NHẬT MÀN HÌNH LCD (Chu kỳ 400ms)
+	         * Giúp I2C không bị nghẽn và mắt người dễ dàng quan sát
+	         * ========================================================= */
+	        if (current_tick - last_lcd_update_time >= 400)
+	        {
+	            last_lcd_update_time = current_tick;
+
+	            LCDI2C_setCursor(0, 1);
+
+	            if (fault_status != 0) {
+	                if (fault_status & MAX31856_FAULT_OPEN) {
+	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: OpenWire ");
+	                } else {
+	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: HW Err%02X", fault_status);
+	                }
+	            }
+	            else if (isnan(temp_current)) {
+	                snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: SPI TimeO");
+	            }
+	            else {
+	                if (temp_current >= -200.0f && temp_current <= 1300.0f) {
+	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Temp: %6.2f %cC ", temp_current, 0xDF);
+	                } else {
+	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Out of Range!   ");
+	                }
+	            }
+
+	            LCDI2C_printstr(lcd_buffer);
+	        }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -244,7 +278,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -277,7 +311,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(MAX31856_GPIO_Port, MAX31856_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(MAX31856_GPIO_Port, MAX31856_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : MAX31856_Pin */
   GPIO_InitStruct.Pin = MAX31856_Pin;
@@ -285,6 +322,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(MAX31856_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

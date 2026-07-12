@@ -1,7 +1,7 @@
 /*
  * @file MAX31856.h
  * Author: TRAN NGUYEN HIEN
- * Major: Electronic And Communication Engineering
+ * Email: trannguyenhien29085@gmail.com
  */
 
 #ifndef MAX31856_H

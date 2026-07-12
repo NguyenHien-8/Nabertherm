@@ -1,14 +1,14 @@
 /*
  * @file MAX31856.c
  * Author: TRAN NGUYEN HIEN
- * Major: Electronic And Communication Engineering
+ * Email: trannguyenhien29085@gmail.com
  */
 
 #include "MAX31856.h"
 #include <math.h>
 
 /* ==================================================================== */
-/* PRIVATE LOW-LEVEL READ/WRITE FUNCTIONS                                   */
+/* PRIVATE LOW-LEVEL READ/WRITE FUNCTIONS                               */
 /* ==================================================================== */
 
 static void MAX31856_WriteRegister8(MAX31856_HandleTypeDef *dev, uint8_t addr, uint8_t data) {

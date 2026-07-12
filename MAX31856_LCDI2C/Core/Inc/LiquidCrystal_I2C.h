@@ -1,7 +1,7 @@
 /*
  * @file LiquidCrystal_I2C.h
  * Author: TRAN NGUYEN HIEN
- * Major: Electronic And Communication Engineering
+ * Email: trannguyenhien29085@gmail.com
  */
 
 #ifndef LIQUIDCRYSTAL_I2C_H
