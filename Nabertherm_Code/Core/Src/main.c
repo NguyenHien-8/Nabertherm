@@ -167,6 +167,10 @@ uint8_t Run_Hour = 0, Run_Min = 0, Run_Sec = 0;
 uint32_t Target_Run_Seconds = 0;
 float Current_Temp = 0.0f;
 
+// Linear interpolation TIOT variables
+uint32_t Current_Interval_Start_Sec = 0;
+float Current_Interval_Start_Temp = 0.0f;
+
 /* Menu Navigation Variables */
 uint8_t Setting_P_Index = 1;        // Tracks which interval (P1...Pn) is being edited.
 uint8_t Menu_Cursor = 0;            // 0: Mode, 1: Set Temp, 2: Set Time.
@@ -272,6 +276,10 @@ void Process_Buttons(void) {
             Run_Hour = 0; Run_Min = 0; Run_Sec = 0;
             Current_Interval = 1;
             System_Run_State = SYS_RUNNING;
+
+            // Thiết lập mốc nội suy ban đầu
+            Current_Interval_Start_Sec = 0;
+            Current_Interval_Start_Temp = Current_Temp > 0 ? Current_Temp : 25.0f;
 
             // Pre-calculate the first auto-step target threshold in absolute seconds.
             Target_Run_Seconds = Intervals[0].Time_Hour * 3600 +
@@ -691,15 +699,20 @@ int main(void)
       // ====================================================================
       // AUTOMATIC STEP-TO-STEP LOGIC & SETPOINT UPDATE
       // ====================================================================
+      uint32_t current_run_seconds = Run_Hour * 3600 + Run_Min * 60 + Run_Sec;
       if (System_Run_State == SYS_RUNNING) {
-          // Convert elapsed time since start into absolute seconds.
-          uint32_t current_run_seconds = Run_Hour * 3600 + Run_Min * 60 + Run_Sec;
-
           // If elapsed time has crossed the calculated threshold for the current interval...
           if (current_run_seconds >= Target_Run_Seconds) {
               if (Current_Interval < Total_Intervals) {
                   // Move to the next segment.
                   Current_Interval++;
+                  // Lấy mốc thời gian và nhiệt độ thực tế để nội suy cho chu kỳ mới
+                  Current_Interval_Start_Sec = current_run_seconds;
+                  if (Current_Interval == 1) {
+                	  Current_Interval_Start_Temp = Current_Temp;
+                  } else {
+                	  Current_Interval_Start_Temp = (float)Intervals[Current_Interval - 2].Temp;
+                  }
                   // Calculate new threshold dynamically by adding the upcoming segment's duration.
                   // This maintains clock continuity.
                   Target_Run_Seconds += (Intervals[Current_Interval-1].Time_Hour * 3600 +
@@ -715,34 +728,75 @@ int main(void)
       }
 
       // ====================================================================
-      // CYCLE 2: PID CALCULATION AND PWM CYCLE UPDATE
+      // CYCLE 2: OPTIMIZED TRAJECTORY GENERATION & PID CALCULATION
       // ====================================================================
       if (System_Run_State == SYS_RUNNING && sensor_fault == 0) {
           if (PID_GetMode(&pid_heater) != PID_AUTOMATIC) {
               PID_SetMode(&pid_heater, PID_AUTOMATIC);
           }
 
-          // Update Setpoint according to current P
-          Setpoint = (float)Intervals[Current_Interval - 1].Temp;
+          float target_temp = (float)Intervals[Current_Interval - 1].Temp;
 
-          // Anti-Windup Logic
+          // ----------------------------------------------------------------
+          // 1. ADVANCED SETPOINT GENERATION (MT & TIOT)
+          // ----------------------------------------------------------------
+          if (Intervals[Current_Interval - 1].Mode == MODE_MT) {
+              Setpoint = target_temp; // Maintain Constant Temperature
+          }
+          else if (Intervals[Current_Interval - 1].Mode == MODE_TIOT) {
+              uint32_t elapsed_in_interval = current_run_seconds - Current_Interval_Start_Sec;
+              uint32_t total_interval_time = (Intervals[Current_Interval-1].Time_Hour * 3600) +
+                                             (Intervals[Current_Interval-1].Time_Min * 60) +
+                                             (Intervals[Current_Interval-1].Time_Sec);
+
+              if (total_interval_time > 0) {
+                  // Sử dụng điểm bắt đầu đã được chuẩn hóa (loại bỏ nhiễu cảm biến)
+                  float ramp_rate = (target_temp - Current_Interval_Start_Temp) / (float)total_interval_time;
+                  float ramp_setpoint = Current_Interval_Start_Temp + (ramp_rate * (float)elapsed_in_interval);
+
+                  // Kẹp (Clamping) thông minh theo cả 2 chiều (Gia nhiệt hoặc Làm nguội dần)
+                  if (target_temp >= Current_Interval_Start_Temp) {
+                      if (ramp_setpoint > target_temp) ramp_setpoint = target_temp;
+                  } else {
+                      if (ramp_setpoint < target_temp) ramp_setpoint = target_temp;
+                  }
+                  Setpoint = ramp_setpoint;
+              } else {
+                  Setpoint = target_temp; // Fallback an toàn nếu thời gian = 0
+              }
+          }
+
+          // ----------------------------------------------------------------
+          // 2. HYSTERESIS ANTI-WINDUP LOGIC (Schmitt Trigger Implementation)
+          // Ngăn chặn chập chờn K_i và tối ưu hóa phản ứng bám quỹ đạo
+          // ----------------------------------------------------------------
           float error = Setpoint - Input;
-          if (fabs(error) > 5.0f && ki_is_active) {
+          float abs_error = fabs(error);
+
+          // Ngưỡng trên (Upper Threshold): 10.0°C - Tắt khâu I khi sai số lớn (Step/Fast Ramp)
+          if (abs_error > 10.0f && ki_is_active) {
               PID_SetTunings(&pid_heater, Kp, 0.0f, Kd, PID_P_ON_E);
               ki_is_active = false;
-          } else if (fabs(error) <= 5.0f && !ki_is_active) {
+          }
+          // Ngưỡng dưới (Lower Threshold): 4.0°C - Bật lại khâu I khi đã tiến vào vùng ổn định
+          else if (abs_error < 4.0f && !ki_is_active) {
               PID_SetTunings(&pid_heater, Kp, Ki, Kd, PID_P_ON_E);
               ki_is_active = true;
           }
 
-          // PID Compute
+          // ----------------------------------------------------------------
+          // 3. DISCRETE PID EXECUTION
+          // Hàm PID_Compute tự động kiểm tra thời gian mẫu (1000ms) không gây block
+          // ----------------------------------------------------------------
           if (PID_Compute(&pid_heater)) {
               windowStartTime = HAL_GetTick();
               active_output = Output;
           }
       } else {
-          // Relay SSR = 0 when Sensor fails, Complete, Setup, Pause
-          if (PID_GetMode(&pid_heater) != PID_MANUAL) PID_SetMode(&pid_heater, PID_MANUAL);
+          // Khi hệ thống dừng hoặc cảm biến lỗi: Tắt hoàn toàn bộ điều khiển
+          if (PID_GetMode(&pid_heater) != PID_MANUAL) {
+              PID_SetMode(&pid_heater, PID_MANUAL);
+          }
           active_output = 0;
           Output = 0;
       }
