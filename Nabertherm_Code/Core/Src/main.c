@@ -11,7 +11,7 @@
   * - Double-Buffering LCD: Prevents I2C bottlenecking and screen flickering.
   * - Auto-step Logic: Uses cumulative target seconds rather than resetting clocks.
   * - PID Control: Time-Proportional Control (Slow PWM) với chu kỳ 1000ms.
-  * - Anti-Windup: Tự động ngắt/bật khâu I (Tích phân) khi gần đạt đích.
+  * - Anti-Windup: Automatically turn on/off stage I (Integration) when nearing the target.
   * - Non-Volatile Storage: Uses Flash Page 63 to save parameters securely.
 ******************************************************************************
   */
@@ -82,8 +82,8 @@ typedef struct {
 // Max segments allowed by the system memory/requirements.
 #define MAX_INTERVALS 9
 
-// Biến cho Time-Proportional Control (Slow PWM)
-#define WINDOW_SIZE 1000 // Chu kỳ băm xung là 1000ms
+// Variable for Time-Proportional Control (Slow PWM)
+#define WINDOW_SIZE 1000
 
 // Flash Storage Architecture
 // STM32F103C8T6 has 64KB Flash. Page 63 is the very last page (1KB size).
@@ -648,9 +648,9 @@ int main(void)
   //====== Init PID ======//
     Setpoint = 0.0f;
     PID_Init(&pid_heater, &Input, &Output, &Setpoint, Kp, Ki, Kd, PID_P_ON_E, PID_DIRECT);
-    PID_SetMode(&pid_heater, PID_MANUAL); // Mặc định tắt cho đến khi ấn RUN
+    PID_SetMode(&pid_heater, PID_MANUAL); // By default, it's off until you press RUN
     PID_SetOutputLimits(&pid_heater, 0, WINDOW_SIZE);
-    PID_SetSampleTime(&pid_heater, WINDOW_SIZE); // Đồng bộ 1000ms
+    PID_SetSampleTime(&pid_heater, WINDOW_SIZE);
     windowStartTime = HAL_GetTick();
 
   /* USER CODE END 2 */
@@ -660,19 +660,19 @@ int main(void)
   while (1)
   {
 	  // ====================================================================
-	  // CHU KỲ 1: ĐỌC VÀ LỌC NHIỄU CẢM BIẾN
+	  // CYCLE 1: READ AND FILTER SENSOR NOISE
       // ====================================================================
       if (HAL_GetTick() - last_temp_read_time >= 250) {
           last_temp_read_time = HAL_GetTick();
 
-          // Kiểm tra lỗi cảm biến
+          // Check for sensor errors
           sensor_fault = MAX31856_ReadFault(&max31856);
 
           if (sensor_fault == 0) {
         	  Current_Temp = MAX31856_ReadThermocoupleTemperature(&max31856);
-        	  if (Current_Temp > -0.1f && Current_Temp <= 1280.0f) { // Lọc giá trị rác cực đoan
+        	  if (Current_Temp > -0.1f && Current_Temp <= 1280.0f) { // Filter out extreme junk values
         		  if (filtered_temp < 0.0f) filtered_temp = Current_Temp;
-        		  else filtered_temp = 0.8f * filtered_temp + 0.2f * Current_Temp; // Bộ lọc EMA
+        		  else filtered_temp = 0.8f * filtered_temp + 0.2f * Current_Temp; // EMA Filter
         		  Input = filtered_temp;
         	  }
           }
@@ -722,7 +722,7 @@ int main(void)
               PID_SetMode(&pid_heater, PID_AUTOMATIC);
           }
 
-          // Cập nhật Setpoint theo P hiện tại (MT và TIOT tạm dùng chung Setpoint đích)
+          // Update Setpoint according to current P
           Setpoint = (float)Intervals[Current_Interval - 1].Temp;
 
           // Anti-Windup Logic
@@ -741,7 +741,7 @@ int main(void)
               active_output = Output;
           }
       } else {
-          // Bảo vệ hệ thống: Ép Relay về 0 khi Tạm dừng, Setup, Xong, hoặc Lỗi
+          // Relay SSR = 0 when Sensor fails, Complete, Setup, Pause
           if (PID_GetMode(&pid_heater) != PID_MANUAL) PID_SetMode(&pid_heater, PID_MANUAL);
           active_output = 0;
           Output = 0;
@@ -753,7 +753,7 @@ int main(void)
       if (System_Run_State == SYS_RUNNING && sensor_fault == 0) {
           uint32_t ms_in_window = HAL_GetTick() - windowStartTime;
 
-          // Xử lý Deadband an toàn cho SSR (Cắt bỏ dải < 20ms và giữ ON toàn thời gian nếu > 980ms)
+          // Safe deadband handling for SSRs (Cut out bands < 20ms and keep ON full time if > 980ms)
           if (active_output <= 20) {
               HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
           } else if (active_output >= (WINDOW_SIZE - 20)) {
@@ -763,7 +763,7 @@ int main(void)
               else HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
           }
       } else {
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // Tắt SSR hoàn toàn
+          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
       }
 
       // ----------------------------------------------------------------------------------
