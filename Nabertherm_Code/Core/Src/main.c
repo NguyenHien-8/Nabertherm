@@ -10,6 +10,8 @@
   * prevent blocking the main loop.
   * - Double-Buffering LCD: Prevents I2C bottlenecking and screen flickering.
   * - Auto-step Logic: Uses cumulative target seconds rather than resetting clocks.
+  * - PID Control: Time-Proportional Control (Slow PWM) với chu kỳ 1000ms.
+  * - Anti-Windup: Tự động ngắt/bật khâu I (Tích phân) khi gần đạt đích.
   * - Non-Volatile Storage: Uses Flash Page 63 to save parameters securely.
 ******************************************************************************
   */
@@ -21,9 +23,12 @@
 /* USER CODE BEGIN Includes */
 #include "LiquidCrystal_I2C.h"
 #include "MAX31856.h"
+#include "PID_Controller.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <stdbool.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -77,6 +82,9 @@ typedef struct {
 // Max segments allowed by the system memory/requirements.
 #define MAX_INTERVALS 9
 
+// Biến cho Time-Proportional Control (Slow PWM)
+#define WINDOW_SIZE 1000 // Chu kỳ băm xung là 1000ms
+
 // Flash Storage Architecture
 // STM32F103C8T6 has 64KB Flash. Page 63 is the very last page (1KB size).
 // Using the last page ensures we do not accidentally overwrite application code.
@@ -98,6 +106,7 @@ TIM_HandleTypeDef htim2;
 
 /* USER CODE BEGIN PV */
 MAX31856_HandleTypeDef max31856;
+PID_TypeDef pid_heater;
 
 /* * Flash Storage Wrapper Structure
  * This struct perfectly aligns our variables for easy writing/reading
@@ -109,31 +118,35 @@ typedef struct {
     Interval_TypeDef Intervals[MAX_INTERVALS]; // Payload.
 } Flash_Data_t;
 
-/*
- * Multi-Pin Independent Debounce Trackers
- * WHY: If we used a single global `last_exti_time`, pressing one button
- * would inadvertently lock out ALL other buttons for 200ms. By isolating
- * the timestamp per pin, simultaneous or rapid multi-button presses are handled correctly.
- */
-//========== Multi-Pin Independent Debounce Variables ==========//
-volatile uint32_t last_time_PA8 = 0;
-volatile uint32_t last_time_PA9 = 0;
-volatile uint32_t last_time_PA10 = 0;
-volatile uint32_t last_time_PA11 = 0;
-volatile uint32_t last_time_PB15 = 0;
+// ================= PID PARAMETTERS & NOISE FILTER =================
+float Input, Output, Setpoint;
+float Kp = 20.0f, Ki = 0.02f, Kd = 300.0f;
+uint32_t windowStartTime = 0;
+float active_output = 0;
+float filtered_temp = -1.0f;
+bool ki_is_active = true;
+uint8_t sensor_fault = 0;
 
+//========== Multi-Pin Independent Debounce Variables ==========//
 /*
  * Button Event Flags
  * WHY: The EXTI ISR should be as short as possible. We only set flags here.
  * The heavy logic (state changing, flash writing) is deferred to Process_Buttons()
  * in the main loop.
  */
+volatile uint32_t last_time_PA8 = 0;
+volatile uint32_t last_time_PA9 = 0;
+volatile uint32_t last_time_PA10 = 0;
+volatile uint32_t last_time_PA11 = 0;
+volatile uint32_t last_time_PB15 = 0;
+
 volatile uint8_t button_setting = 0;    // PA8 -> Setting/Run
 volatile uint8_t button_redirect = 0;   // PA9 -> Redirect
 volatile uint8_t button_select = 0;     // PB15 -> OK/Select
 volatile uint8_t button_tang = 0;       // PA11 -> UP
 volatile uint8_t button_giam = 0;       // PA10 -> DOWN
 
+// ================= SYSTEM LOGIC & UI =================
 /* System Logic & Payload Variables */
 Interval_TypeDef Intervals[MAX_INTERVALS];
 uint8_t Total_Intervals = 1;
@@ -253,7 +266,6 @@ void Process_Buttons(void) {
             // Exit Settings Mode.
             // Critical Step: Save to Non-Volatile Memory on exit.
             Save_Settings_To_Flash();
-
             Current_UI_State = UI_STATE_MAIN;
 
             // Hard reset the timeline to begin a fresh run from Interval 1.
@@ -413,19 +425,26 @@ void Update_LCD(void) {
 
     switch (Current_UI_State) {
         case UI_STATE_MAIN:
-            // String Concatenation Fix: Separating "\xDF" (Degree Symbol) from "C"
-            // prevents the GCC compiler from parsing "C" as part of the hex sequence.
-            if (System_Run_State == SYS_IDLE) {
-            	sprintf(temp_buf, "Temp:%4d" "\xDF" "C P0/%d", (int)Current_Temp, Total_Intervals);
-            } else if (System_Run_State == SYS_COMPLETED) {
-            	sprintf(temp_buf, "Temp:%4d" "\xDF" "C DONE", (int)Current_Temp);
-            } else {
-            	sprintf(temp_buf, "Temp:%4d" "\xDF" "C P%d/%d", (int)Current_Temp, Current_Interval, Total_Intervals);
-            }
-            memcpy(row1, temp_buf, strlen(temp_buf));
+        	if (sensor_fault != 0) {
+        		sprintf(temp_buf, "==SENSOR ERROR==");
+                memcpy(row1, temp_buf, strlen(temp_buf));
+                sprintf(temp_buf, "SSR: OFF        ");
+                memcpy(row2, temp_buf, strlen(temp_buf));
+        	} else {
+                // String Concatenation Fix: Separating "\xDF" (Degree Symbol) from "C"
+                // prevents the GCC compiler from parsing "C" as part of the hex sequence.
+                if (System_Run_State == SYS_IDLE) {
+                	sprintf(temp_buf, "Temp:%4d" "\xDF" "C P0/%d", (int)Current_Temp, Total_Intervals);
+                } else if (System_Run_State == SYS_COMPLETED) {
+                	sprintf(temp_buf, "Temp:%4d" "\xDF" "C DONE", (int)Current_Temp);
+                } else {
+                	sprintf(temp_buf, "Temp:%4d" "\xDF" "C P%d/%d", (int)Current_Temp, Current_Interval, Total_Intervals);
+                }
+                memcpy(row1, temp_buf, strlen(temp_buf));
 
-            sprintf(temp_buf, "Time: %02d:%02d:%02d", Run_Hour, Run_Min, Run_Sec);
-            memcpy(row2, temp_buf, strlen(temp_buf));
+                sprintf(temp_buf, "Time: %02d:%02d:%02d", Run_Hour, Run_Min, Run_Sec);
+                memcpy(row2, temp_buf, strlen(temp_buf));
+        	}
             break;
 
         case UI_STATE_SET_INTERVAL:
@@ -626,35 +645,52 @@ int main(void)
     MAX31856_SetNoiseFilter(&max31856, MAX31856_NOISE_FILTER_50HZ);
     MAX31856_SetConversionMode(&max31856, MAX31856_CONTINUOUS);
 
+  //====== Init PID ======//
+    Setpoint = 0.0f;
+    PID_Init(&pid_heater, &Input, &Output, &Setpoint, Kp, Ki, Kd, PID_P_ON_E, PID_DIRECT);
+    PID_SetMode(&pid_heater, PID_MANUAL); // Mặc định tắt cho đến khi ấn RUN
+    PID_SetOutputLimits(&pid_heater, 0, WINDOW_SIZE);
+    PID_SetSampleTime(&pid_heater, WINDOW_SIZE); // Đồng bộ 1000ms
+    windowStartTime = HAL_GetTick();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  // -------------------------------------------------------------------
-      // 1. ASYNCHRONOUS POLLING: Temp Sensor Read
-      // Uses the Systick (HAL_GetTick) to run every 500ms without blocking.
-      // -------------------------------------------------------------------
-      if (HAL_GetTick() - last_temp_read_time >= 500) {
+	  // ====================================================================
+	  // CHU KỲ 1: ĐỌC VÀ LỌC NHIỄU CẢM BIẾN
+      // ====================================================================
+      if (HAL_GetTick() - last_temp_read_time >= 250) {
           last_temp_read_time = HAL_GetTick();
-          Current_Temp = MAX31856_ReadThermocoupleTemperature(&max31856);
 
+          // Kiểm tra lỗi cảm biến
+          sensor_fault = MAX31856_ReadFault(&max31856);
+
+          if (sensor_fault == 0) {
+        	  Current_Temp = MAX31856_ReadThermocoupleTemperature(&max31856);
+        	  if (Current_Temp > -0.1f && Current_Temp <= 1280.0f) { // Lọc giá trị rác cực đoan
+        		  if (filtered_temp < 0.0f) filtered_temp = Current_Temp;
+        		  else filtered_temp = 0.8f * filtered_temp + 0.2f * Current_Temp; // Bộ lọc EMA
+        		  Input = filtered_temp;
+        	  }
+          }
           // Request a UI redraw only if we are actively viewing the temp.
           if (Current_UI_State == UI_STATE_MAIN) {
               LCD_Needs_Update = true;
           }
       }
 
-      // ---------------------------------------------------------
-      // 2. DISPATCHER: Input Handling
+      // ====================================================================
+      // DISPATCHER: Input Handling
       // Executes logic triggered by the EXTI ISR flags.
-      // ---------------------------------------------------------
+      // ====================================================================
       Process_Buttons();
 
-      // ---------------------------------------------------------
-      // 3. AUTO-STEP LOGIC: Cumulative Timeline
-      // ---------------------------------------------------------
+      // ====================================================================
+      // AUTOMATIC STEP-TO-STEP LOGIC & SETPOINT UPDATE
+      // ====================================================================
       if (System_Run_State == SYS_RUNNING) {
           // Convert elapsed time since start into absolute seconds.
           uint32_t current_run_seconds = Run_Hour * 3600 + Run_Min * 60 + Run_Sec;
@@ -664,7 +700,6 @@ int main(void)
               if (Current_Interval < Total_Intervals) {
                   // Move to the next segment.
                   Current_Interval++;
-
                   // Calculate new threshold dynamically by adding the upcoming segment's duration.
                   // This maintains clock continuity.
                   Target_Run_Seconds += (Intervals[Current_Interval-1].Time_Hour * 3600 +
@@ -679,8 +714,60 @@ int main(void)
           }
       }
 
+      // ====================================================================
+      // CYCLE 2: PID CALCULATION AND PWM CYCLE UPDATE
+      // ====================================================================
+      if (System_Run_State == SYS_RUNNING && sensor_fault == 0) {
+          if (PID_GetMode(&pid_heater) != PID_AUTOMATIC) {
+              PID_SetMode(&pid_heater, PID_AUTOMATIC);
+          }
+
+          // Cập nhật Setpoint theo P hiện tại (MT và TIOT tạm dùng chung Setpoint đích)
+          Setpoint = (float)Intervals[Current_Interval - 1].Temp;
+
+          // Anti-Windup Logic
+          float error = Setpoint - Input;
+          if (fabs(error) > 5.0f && ki_is_active) {
+              PID_SetTunings(&pid_heater, Kp, 0.0f, Kd, PID_P_ON_E);
+              ki_is_active = false;
+          } else if (fabs(error) <= 5.0f && !ki_is_active) {
+              PID_SetTunings(&pid_heater, Kp, Ki, Kd, PID_P_ON_E);
+              ki_is_active = true;
+          }
+
+          // PID Compute
+          if (PID_Compute(&pid_heater)) {
+              windowStartTime = HAL_GetTick();
+              active_output = Output;
+          }
+      } else {
+          // Bảo vệ hệ thống: Ép Relay về 0 khi Tạm dừng, Setup, Xong, hoặc Lỗi
+          if (PID_GetMode(&pid_heater) != PID_MANUAL) PID_SetMode(&pid_heater, PID_MANUAL);
+          active_output = 0;
+          Output = 0;
+      }
+
+      // ====================================================================
+      // CYCLE 3: SSR CONTROL USING TIME-PROPORTIONAL PWM
+      // ====================================================================
+      if (System_Run_State == SYS_RUNNING && sensor_fault == 0) {
+          uint32_t ms_in_window = HAL_GetTick() - windowStartTime;
+
+          // Xử lý Deadband an toàn cho SSR (Cắt bỏ dải < 20ms và giữ ON toàn thời gian nếu > 980ms)
+          if (active_output <= 20) {
+              HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+          } else if (active_output >= (WINDOW_SIZE - 20)) {
+              HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+          } else {
+              if (ms_in_window < active_output) HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+              else HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+          }
+      } else {
+          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // Tắt SSR hoàn toàn
+      }
+
       // ----------------------------------------------------------------------------------
-      // 4. DISPATCHER: UI Renderer
+      // DISPATCHER: UI Renderer
       // Repaints the LCD if and only if LCD_Needs_Update flag was raised by other modules.
       // ----------------------------------------------------------------------------------
       Update_LCD();

@@ -26,7 +26,7 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim.h \
  ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_tim_ex.h \
  ../Core/Inc/LiquidCrystal_I2C.h ../Core/Inc/main.h \
- ../Core/Inc/MAX31856.h
+ ../Core/Inc/MAX31856.h ../Core/Inc/PID_Controller.h
 ../Core/Inc/main.h:
 ../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h:
 ../Core/Inc/stm32f1xx_hal_conf.h:
@@ -57,3 +57,4 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Core/Inc/LiquidCrystal_I2C.h:
 ../Core/Inc/main.h:
 ../Core/Inc/MAX31856.h:
+../Core/Inc/PID_Controller.h:
