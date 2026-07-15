@@ -26,6 +26,7 @@
 #include "PID_Controller.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,15 +56,17 @@ PID_TypeDef pid_heater;
 
 // Biến cho PID
 float Input, Output, Setpoint;
-float Kp = 3.0f, Ki = 0.05f, Kd = 30.0f; // Bạn sẽ cần tuning (dò) lại 3 thông số này thực tế với lò
+float Kp = 20.0f, Ki = 0.02f, Kd = 300.0f;
 
 // Biến cho Time-Proportional Control (Slow PWM)
 #define WINDOW_SIZE 1000 // Chu kỳ băm xung là 1000ms (1 giây)
 uint32_t windowStartTime = 0;
+float active_output = 0; // Biến "chốt" (lock) Output cho 1 chu kỳ PWM
 
-// Các biến định thời phi nghẽn (Non-blocking Timers)
-uint32_t lastPidCompute = 0;
+// Các biến định thời phi nghẽn
+uint32_t lastSensorUpdate = 0;
 uint32_t lastLcdUpdate = 0;
+uint8_t sensor_fault = 0; // Biến lưu trạng thái lỗi cảm biến
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -117,25 +120,26 @@ int main(void)
     LCDI2C_backlight();
     LCDI2C_clear();
 
-  // 3. Khởi tạo cảm biến MAX31856 ở chế độ CONTINUOUS (Chạy ngầm tự động)
+  // 2. Khởi tạo cảm biến MAX31856
     MAX31856_Init(&max31856, &hspi1, GPIOA, GPIO_PIN_15);
-    MAX31856_SetThermocoupleType(&max31856, MAX31856_TCTYPE_K);
+    MAX31856_SetThermocoupleType(&max31856, MAX31856_TCTYPE_S);
     MAX31856_SetNoiseFilter(&max31856, MAX31856_NOISE_FILTER_50HZ);
     MAX31856_SetConversionMode(&max31856, MAX31856_CONTINUOUS);
 
   // 3. Khởi tạo bộ PID
-    Setpoint = 50.0f; // Nhiệt độ cài đặt mục tiêu
+    Setpoint = 150.0f;
     PID_Init(&pid_heater, &Input, &Output, &Setpoint, Kp, Ki, Kd, PID_P_ON_E, PID_DIRECT);
     PID_SetMode(&pid_heater, PID_AUTOMATIC);
     PID_SetOutputLimits(&pid_heater, 0, WINDOW_SIZE);
-    PID_SetSampleTime(&pid_heater, 250); // Chu kỳ tính toán PID đồng bộ là 200ms
 
+    // Đồng bộ Chu kỳ tính toán PID đúng bằng chu kỳ băm xung SSR
+    PID_SetSampleTime(&pid_heater, WINDOW_SIZE);
     windowStartTime = HAL_GetTick();
 
     // Biến dùng cho bộ lọc EMA (Exponential Moving Average)
-      static float filtered_temp = -1.0f;
-      // Trạng thái Anti-Windup để tránh gọi hàm SetTunings liên tục
-      static bool ki_is_active = true;
+     static float filtered_temp = -1.0f;
+    // Trạng thái Anti-Windup để tránh gọi hàm SetTunings liên tục
+     static bool ki_is_active = true;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -144,79 +148,104 @@ int main(void)
   {
 	  uint32_t currentTick = HAL_GetTick();
       /* ==================================================================== */
-      /* CHU KỲ 1: ĐIỀU KHIỂN SSR (Time-Proportional)                         */
+      /* CHU KỲ 1: ĐỌC VÀ LỌC NHIỄU CẢM BIẾN (Chạy định kỳ 250ms)             */
       /* ==================================================================== */
-      // Chống trôi thời gian chính xác hơn bằng cách cộng thêm WINDOW_SIZE
-      if (currentTick - windowStartTime >= WINDOW_SIZE)
+      if (currentTick - lastSensorUpdate >= 250)
       {
-          windowStartTime += WINDOW_SIZE;
-      }
+          lastSensorUpdate = currentTick;
 
-      // Giới hạn Minimum Pulse Width: Bỏ qua các xung dưới 20ms (1 chu kỳ lưới 50Hz)
-      // Điều này ngăn SSR đóng cắt chập chờn gây hại linh kiện
-      if (Output > 20 && Output > (currentTick - windowStartTime))
-      {
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
-      }
-      else
-      {
-          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
-      }
+          // Kiểm tra lỗi cảm biến
+          sensor_fault = MAX31856_ReadFault(&max31856);
 
-      /* ==================================================================== */
-      /* CHU KỲ 2: ĐỌC CẢM BIẾN & TÍNH TOÁN PID (Chạy định kỳ mỗi 250ms)      */
-      /* ==================================================================== */
-      if (currentTick - lastPidCompute >= 250)
-      {
-          lastPidCompute = currentTick;
-
-          float temp_read = MAX31856_ReadThermocoupleTemperature(&max31856);
-
-          if (temp_read > -0.1f && temp_read < 500.0f)
+          if (sensor_fault == 0)
           {
-              // BỘ LỌC TÍN HIỆU THÔNG THẤP (EMA Filter)
-              // Giúp làm mượt tín hiệu nhiễu, làm cho khâu Đạo hàm (Kd) hoạt động chính xác
-              if (filtered_temp < 0.0f) {
-                  filtered_temp = temp_read; // Khởi tạo giá trị lần đầu
-              } else {
-                  filtered_temp = 0.8f * filtered_temp + 0.2f * temp_read;
+              float temp_read = MAX31856_ReadThermocoupleTemperature(&max31856);
+              if (temp_read > -0.1f && temp_read < 500.0f) { // Lọc giá trị rác cực đoan
+                  if (filtered_temp < 0.0f) filtered_temp = temp_read;
+                  else filtered_temp = 0.8f * filtered_temp + 0.2f * temp_read; // Bộ lọc EMA
+                  Input = filtered_temp;
               }
+          } else {
+              // Bảo vệ phần cứng: Tắt gia nhiệt ngay lập tức nếu cảm biến lỗi
+              PID_SetMode(&pid_heater, PID_MANUAL);
+              active_output = 0;
+              Output = 0;
+          }
+      }
 
-              Input = filtered_temp;
+      /* ==================================================================== */
+      /* CHU KỲ 2: TÍNH TOÁN PID VÀ CẬP NHẬT CHU KỲ PWM                       */
+      /* ==================================================================== */
+      if (sensor_fault == 0) {
+          if (PID_GetMode(&pid_heater) != PID_AUTOMATIC) {
+              PID_SetMode(&pid_heater, PID_AUTOMATIC);
           }
 
-          // Anti-Windup tối ưu: Chỉ cập nhật lại Tuning khi có sự thay đổi ranh giới
+          // Anti-Windup: Chỉ bật khâu I (Tích phân) khi cách đích <= 5 độ C
           float error = Setpoint - Input;
-
-          if ((error > 15.0f || error < -15.0f) && ki_is_active)
-          {
+          if (fabs(error) > 5.0f && ki_is_active) {
               PID_SetTunings(&pid_heater, Kp, 0.0f, Kd, PID_P_ON_E);
               ki_is_active = false;
-          }
-          else if ((error <= 15.0f && error >= -15.0f) && !ki_is_active)
-          {
+          } else if (fabs(error) <= 5.0f && !ki_is_active) {
               PID_SetTunings(&pid_heater, Kp, Ki, Kd, PID_P_ON_E);
               ki_is_active = true;
           }
 
-          PID_Compute(&pid_heater);
+          // Cho phép thư viện PID tự quyết định thời điểm cập nhật dựa trên SampleTime (1000ms)
+          if (PID_Compute(&pid_heater)) {
+              // Hàm PID_Compute trả về true -> Có giá trị Output mới
+              // ĐỒNG BỘ HOÁ: Reset lại bộ đếm PWM window ngay lúc này
+              windowStartTime = currentTick;
+              active_output = Output;
+          }
       }
 
       /* ==================================================================== */
-      /* CHU KỲ 3: CẬP NHẬT LCD (Chạy định kỳ mỗi 500ms)                      */
+      /* CHU KỲ 3: ĐIỀU KHIỂN SSR PWM (Chạy liên tục không block)             */
+      /* ==================================================================== */
+      if (sensor_fault != 0) {
+          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+      } else {
+          uint32_t ms_in_window = currentTick - windowStartTime;
+
+          // Xử lý Deadband an toàn cho SSR (Cắt bỏ dải < 20ms và giữ ON toàn thời gian nếu > 980ms)
+          if (active_output <= 20) {
+              HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+          } else if (active_output >= (WINDOW_SIZE - 20)) {
+              HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+          } else {
+              // Băm xung bình thường
+              if (ms_in_window < active_output) {
+                  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
+              } else {
+                  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+              }
+          }
+      }
+
+      /* ==================================================================== */
+      /* CHU KỲ 4: CẬP NHẬT LCD (Chạy định kỳ mỗi 500ms)                      */
       /* ==================================================================== */
       if (currentTick - lastLcdUpdate >= 500)
       {
           lastLcdUpdate = currentTick;
-          char lcd_buf[16];
+          char lcd_buf[18];
 
-          LCDI2C_setCursor(0, 0);
-          snprintf(lcd_buf, sizeof(lcd_buf), "SP:%.1f PV:%.1f ", Setpoint, Input);
-          LCDI2C_write_String(lcd_buf);
+          if (sensor_fault != 0) {
+              LCDI2C_setCursor(0, 0);
+              LCDI2C_write_String("SENSOR ERROR!   ");
+              LCDI2C_setCursor(0, 1);
+              LCDI2C_write_String("SSR: OFF        ");
+          } else {
+              LCDI2C_setCursor(0, 0);
+              snprintf(lcd_buf, sizeof(lcd_buf), "SP:%3.0f PV:%3.2f", Setpoint, Input);
+              LCDI2C_write_String(lcd_buf);
 
-          LCDI2C_setCursor(0, 1);
-          snprintf(lcd_buf, sizeof(lcd_buf), "SSR Out: %4dms", (int)Output);
-          LCDI2C_write_String(lcd_buf);
+              LCDI2C_setCursor(0, 1);
+              // Ký hiệu [I] hiển thị để theo dõi xem bộ Anti-Windup đang bật hay tắt Tích phân
+              snprintf(lcd_buf, sizeof(lcd_buf), "SSR: %4dms %c   ", (int)active_output, ki_is_active ? 'I' : ' ');
+              LCDI2C_write_String(lcd_buf);
+          }
       }
     /* USER CODE END WHILE */
 
@@ -357,7 +386,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : PA15 */
   GPIO_InitStruct.Pin = GPIO_PIN_15;
@@ -366,8 +395,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_9;
+  /*Configure GPIO pin : PB7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;

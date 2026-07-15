@@ -2576,8 +2576,8 @@ int main(void)
  8001742:	2102      	movs	r1, #2
  8001744:	484f      	ldr	r0, [pc, #316]	@ (8001884 <main+0x188>)
  8001746:	f7ff fed6 	bl	80014f6 <MAX31856_SetConversionMode>
-    MAX31856_SetThermocoupleType(&hmax31856, MAX31856_TCTYPE_K);
- 800174a:	2103      	movs	r1, #3
+    MAX31856_SetThermocoupleType(&hmax31856, MAX31856_TCTYPE_S);
+ 800174a:	2106      	movs	r1, #6
  800174c:	484d      	ldr	r0, [pc, #308]	@ (8001884 <main+0x188>)
  800174e:	f7ff ff00 	bl	8001552 <MAX31856_SetThermocoupleType>
     MAX31856_SetNoiseFilter(&hmax31856, MAX31856_NOISE_FILTER_50HZ);
@@ -2594,41 +2594,39 @@ int main(void)
  800175c:	2180      	movs	r1, #128	@ 0x80
  800175e:	484a      	ldr	r0, [pc, #296]	@ (8001888 <main+0x18c>)
  8001760:	f000 fe8e 	bl	8002480 <HAL_GPIO_WritePin>
-	  // Lấy thời gian hiện tại của hệ thống (đơn vị mili-giây)
-	        uint32_t current_tick = HAL_GetTick();
+      uint32_t current_tick = HAL_GetTick();
  8001764:	f000 fbf6 	bl	8001f54 <HAL_GetTick>
  8001768:	6178      	str	r0, [r7, #20]
 
-	        /* =========================================================
-	         * TÁC VỤ 1: ĐỌC CẢM BIẾN TỐC ĐỘ CAO (Chu kỳ 100ms)
-	         * Ở chế độ Continuous, lệnh đọc SPI tốn chưa tới 1ms
-	         * ========================================================= */
-	        if (current_tick - last_temp_read_time >= 100)
+      /* =========================================================
+       * TÁC VỤ 1: ĐỌC CẢM BIẾN TỐC ĐỘ CAO (Chu kỳ 100ms)
+       * ========================================================= */
+      if (current_tick - last_temp_read_time >= 100)
  800176a:	4b48      	ldr	r3, [pc, #288]	@ (800188c <main+0x190>)
  800176c:	681b      	ldr	r3, [r3, #0]
  800176e:	697a      	ldr	r2, [r7, #20]
  8001770:	1ad3      	subs	r3, r2, r3
  8001772:	2b63      	cmp	r3, #99	@ 0x63
  8001774:	d919      	bls.n	80017aa <main+0xae>
-	        {
-	            last_temp_read_time = current_tick;
+      {
+          last_temp_read_time = current_tick;
  8001776:	4a45      	ldr	r2, [pc, #276]	@ (800188c <main+0x190>)
  8001778:	697b      	ldr	r3, [r7, #20]
  800177a:	6013      	str	r3, [r2, #0]
 
-	            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET); // Debug pin ON
+          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
  800177c:	2201      	movs	r2, #1
  800177e:	2180      	movs	r1, #128	@ 0x80
  8001780:	4841      	ldr	r0, [pc, #260]	@ (8001888 <main+0x18c>)
  8001782:	f000 fe7d 	bl	8002480 <HAL_GPIO_WritePin>
 
-	            temp_current = MAX31856_ReadThermocoupleTemperature(&hmax31856);
+          temp_current = MAX31856_ReadThermocoupleTemperature(&hmax31856);
  8001786:	483f      	ldr	r0, [pc, #252]	@ (8001884 <main+0x188>)
  8001788:	f7ff ff72 	bl	8001670 <MAX31856_ReadThermocoupleTemperature>
  800178c:	4603      	mov	r3, r0
  800178e:	4a40      	ldr	r2, [pc, #256]	@ (8001890 <main+0x194>)
  8001790:	6013      	str	r3, [r2, #0]
-	            fault_status = MAX31856_ReadFault(&hmax31856);
+          fault_status = MAX31856_ReadFault(&hmax31856);
  8001792:	483c      	ldr	r0, [pc, #240]	@ (8001884 <main+0x188>)
  8001794:	f7ff ff01 	bl	800159a <MAX31856_ReadFault>
  8001798:	4603      	mov	r3, r0
@@ -2636,54 +2634,54 @@ int main(void)
  800179c:	4b3d      	ldr	r3, [pc, #244]	@ (8001894 <main+0x198>)
  800179e:	701a      	strb	r2, [r3, #0]
 
-	            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // Debug pin OFF
+          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
  80017a0:	2200      	movs	r2, #0
  80017a2:	2180      	movs	r1, #128	@ 0x80
  80017a4:	4838      	ldr	r0, [pc, #224]	@ (8001888 <main+0x18c>)
  80017a6:	f000 fe6b 	bl	8002480 <HAL_GPIO_WritePin>
+      }
 
-	        /* =========================================================
-	         * TÁC VỤ 2: CẬP NHẬT MÀN HÌNH LCD (Chu kỳ 400ms)
-	         * Giúp I2C không bị nghẽn và mắt người dễ dàng quan sát
-	         * ========================================================= */
-	        if (current_tick - last_lcd_update_time >= 400)
+      /* =========================================================
+       * TÁC VỤ 2: CẬP NHẬT MÀN HÌNH LCD (Chu kỳ 400ms)
+       * ========================================================= */
+      if (current_tick - last_lcd_update_time >= 400)
  80017aa:	4b3b      	ldr	r3, [pc, #236]	@ (8001898 <main+0x19c>)
  80017ac:	681b      	ldr	r3, [r3, #0]
  80017ae:	697a      	ldr	r2, [r7, #20]
  80017b0:	1ad3      	subs	r3, r2, r3
  80017b2:	f5b3 7fc8 	cmp.w	r3, #400	@ 0x190
  80017b6:	d3d0      	bcc.n	800175a <main+0x5e>
-	        {
-	            last_lcd_update_time = current_tick;
+      {
+          last_lcd_update_time = current_tick;
  80017b8:	4a37      	ldr	r2, [pc, #220]	@ (8001898 <main+0x19c>)
  80017ba:	697b      	ldr	r3, [r7, #20]
  80017bc:	6013      	str	r3, [r2, #0]
 
-	            LCDI2C_setCursor(0, 1);
+          LCDI2C_setCursor(0, 1);
  80017be:	2101      	movs	r1, #1
  80017c0:	2000      	movs	r0, #0
  80017c2:	f7ff fce5 	bl	8001190 <LCDI2C_setCursor>
 
-	            if (fault_status != 0) {
+          if (fault_status != 0) {
  80017c6:	4b33      	ldr	r3, [pc, #204]	@ (8001894 <main+0x198>)
  80017c8:	781b      	ldrb	r3, [r3, #0]
  80017ca:	2b00      	cmp	r3, #0
  80017cc:	d014      	beq.n	80017f8 <main+0xfc>
-	                if (fault_status & MAX31856_FAULT_OPEN) {
+              if (fault_status & MAX31856_FAULT_OPEN) {
  80017ce:	4b31      	ldr	r3, [pc, #196]	@ (8001894 <main+0x198>)
  80017d0:	781b      	ldrb	r3, [r3, #0]
  80017d2:	f003 0301 	and.w	r3, r3, #1
  80017d6:	2b00      	cmp	r3, #0
  80017d8:	d006      	beq.n	80017e8 <main+0xec>
-	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: OpenWire ");
+                  snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: OpenWire ");
  80017da:	463b      	mov	r3, r7
  80017dc:	4a2f      	ldr	r2, [pc, #188]	@ (800189c <main+0x1a0>)
  80017de:	2111      	movs	r1, #17
  80017e0:	4618      	mov	r0, r3
  80017e2:	f003 f9af 	bl	8004b44 <sniprintf>
  80017e6:	e040      	b.n	800186a <main+0x16e>
-	                } else {
-	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: HW Err%02X", fault_status);
+              } else {
+                  snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: HW Err%02X", fault_status);
  80017e8:	4b2a      	ldr	r3, [pc, #168]	@ (8001894 <main+0x198>)
  80017ea:	781b      	ldrb	r3, [r3, #0]
  80017ec:	4638      	mov	r0, r7
@@ -2691,9 +2689,8 @@ int main(void)
  80017f0:	2111      	movs	r1, #17
  80017f2:	f003 f9a7 	bl	8004b44 <sniprintf>
  80017f6:	e038      	b.n	800186a <main+0x16e>
-	                }
-	            }
-	            else if (isnan(temp_current)) {
+              }
+          } else if (isnan(temp_current)) {
  80017f8:	4b25      	ldr	r3, [pc, #148]	@ (8001890 <main+0x194>)
  80017fa:	681b      	ldr	r3, [r3, #0]
  80017fc:	4619      	mov	r1, r3
@@ -2702,16 +2699,15 @@ int main(void)
  8001804:	4603      	mov	r3, r0
  8001806:	2b00      	cmp	r3, #0
  8001808:	d006      	beq.n	8001818 <main+0x11c>
-	                snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: SPI TimeO");
+              snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: SPI TimeO");
  800180a:	463b      	mov	r3, r7
  800180c:	4a25      	ldr	r2, [pc, #148]	@ (80018a4 <main+0x1a8>)
  800180e:	2111      	movs	r1, #17
  8001810:	4618      	mov	r0, r3
  8001812:	f003 f997 	bl	8004b44 <sniprintf>
  8001816:	e028      	b.n	800186a <main+0x16e>
-	            }
-	            else {
-	                if (temp_current >= -200.0f && temp_current <= 1300.0f) {
+          } else {
+              if (temp_current >= -200.0f && temp_current <= 1300.0f) {
  8001818:	4b1d      	ldr	r3, [pc, #116]	@ (8001890 <main+0x194>)
  800181a:	681b      	ldr	r3, [r3, #0]
  800181c:	4922      	ldr	r1, [pc, #136]	@ (80018a8 <main+0x1ac>)
@@ -2728,7 +2724,7 @@ int main(void)
  8001836:	4603      	mov	r3, r0
  8001838:	2b00      	cmp	r3, #0
  800183a:	d010      	beq.n	800185e <main+0x162>
-	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Temp: %6.2f %cC ", temp_current, 0xDF);
+                  snprintf(lcd_buffer, sizeof(lcd_buffer), "Temp: %6.2f %cC ", temp_current, 0xDF);
  800183c:	4b14      	ldr	r3, [pc, #80]	@ (8001890 <main+0x194>)
  800183e:	681b      	ldr	r3, [r3, #0]
  8001840:	4618      	mov	r0, r3
@@ -2743,17 +2739,17 @@ int main(void)
  8001856:	2111      	movs	r1, #17
  8001858:	f003 f974 	bl	8004b44 <sniprintf>
  800185c:	e005      	b.n	800186a <main+0x16e>
-	                } else {
-	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Out of Range!   ");
+              } else {
+                  snprintf(lcd_buffer, sizeof(lcd_buffer), "Out of Range!   ");
  800185e:	463b      	mov	r3, r7
  8001860:	4a14      	ldr	r2, [pc, #80]	@ (80018b4 <main+0x1b8>)
  8001862:	2111      	movs	r1, #17
  8001864:	4618      	mov	r0, r3
  8001866:	f003 f96d 	bl	8004b44 <sniprintf>
-	                }
-	            }
+              }
+          }
 
-	            LCDI2C_printstr(lcd_buffer);
+          LCDI2C_printstr(lcd_buffer);
  800186a:	463b      	mov	r3, r7
  800186c:	4618      	mov	r0, r3
  800186e:	f7ff fd54 	bl	800131a <LCDI2C_printstr>

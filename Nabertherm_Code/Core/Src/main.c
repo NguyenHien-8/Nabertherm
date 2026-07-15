@@ -622,7 +622,7 @@ int main(void)
 
   //====== Init MAX31856 ======//
     MAX31856_Init(&max31856, &hspi1, GPIOA, GPIO_PIN_15);
-    MAX31856_SetThermocoupleType(&max31856, MAX31856_TCTYPE_K);
+    MAX31856_SetThermocoupleType(&max31856, MAX31856_TCTYPE_S );
     MAX31856_SetNoiseFilter(&max31856, MAX31856_NOISE_FILTER_50HZ);
     MAX31856_SetConversionMode(&max31856, MAX31856_CONTINUOUS);
 

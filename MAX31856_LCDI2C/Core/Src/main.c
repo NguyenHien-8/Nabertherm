@@ -116,7 +116,7 @@ int main(void)
 
   // 3. Configuration type can nhiet K
     MAX31856_SetConversionMode(&hmax31856, MAX31856_CONTINUOUS);
-    MAX31856_SetThermocoupleType(&hmax31856, MAX31856_TCTYPE_K);
+    MAX31856_SetThermocoupleType(&hmax31856, MAX31856_TCTYPE_S);
     MAX31856_SetNoiseFilter(&hmax31856, MAX31856_NOISE_FILTER_50HZ);
   /* USER CODE END 2 */
 
@@ -126,55 +126,50 @@ int main(void)
   while (1)
   {
 	  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
-	  // Lấy thời gian hiện tại của hệ thống (đơn vị mili-giây)
-	        uint32_t current_tick = HAL_GetTick();
+      uint32_t current_tick = HAL_GetTick();
 
-	        /* =========================================================
-	         * TÁC VỤ 1: ĐỌC CẢM BIẾN TỐC ĐỘ CAO (Chu kỳ 100ms)
-	         * Ở chế độ Continuous, lệnh đọc SPI tốn chưa tới 1ms
-	         * ========================================================= */
-	        if (current_tick - last_temp_read_time >= 100)
-	        {
-	            last_temp_read_time = current_tick;
+      /* =========================================================
+       * TÁC VỤ 1: ĐỌC CẢM BIẾN TỐC ĐỘ CAO (Chu kỳ 100ms)
+       * ========================================================= */
+      if (current_tick - last_temp_read_time >= 100)
+      {
+          last_temp_read_time = current_tick;
 
-	            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET); // Debug pin ON
+          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
 
-	            temp_current = MAX31856_ReadThermocoupleTemperature(&hmax31856);
-	            fault_status = MAX31856_ReadFault(&hmax31856);
+          temp_current = MAX31856_ReadThermocoupleTemperature(&hmax31856);
+          fault_status = MAX31856_ReadFault(&hmax31856);
 
-	            HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET); // Debug pin OFF
-	        }
+          HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+      }
 
-	        /* =========================================================
-	         * TÁC VỤ 2: CẬP NHẬT MÀN HÌNH LCD (Chu kỳ 400ms)
-	         * Giúp I2C không bị nghẽn và mắt người dễ dàng quan sát
-	         * ========================================================= */
-	        if (current_tick - last_lcd_update_time >= 400)
-	        {
-	            last_lcd_update_time = current_tick;
+      /* =========================================================
+       * TÁC VỤ 2: CẬP NHẬT MÀN HÌNH LCD (Chu kỳ 400ms)
+       * ========================================================= */
+      if (current_tick - last_lcd_update_time >= 400)
+      {
+          last_lcd_update_time = current_tick;
 
-	            LCDI2C_setCursor(0, 1);
+          LCDI2C_setCursor(0, 1);
 
-	            if (fault_status != 0) {
-	                if (fault_status & MAX31856_FAULT_OPEN) {
-	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: OpenWire ");
-	                } else {
-	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: HW Err%02X", fault_status);
-	                }
-	            }
-	            else if (isnan(temp_current)) {
-	                snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: SPI TimeO");
-	            }
-	            else {
-	                if (temp_current >= -200.0f && temp_current <= 1300.0f) {
-	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Temp: %6.2f %cC ", temp_current, 0xDF);
-	                } else {
-	                    snprintf(lcd_buffer, sizeof(lcd_buffer), "Out of Range!   ");
-	                }
-	            }
+          if (fault_status != 0) {
+              if (fault_status & MAX31856_FAULT_OPEN) {
+                  snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: OpenWire ");
+              } else {
+                  snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: HW Err%02X", fault_status);
+              }
+          } else if (isnan(temp_current)) {
+              snprintf(lcd_buffer, sizeof(lcd_buffer), "Fault: SPI TimeO");
+          } else {
+              if (temp_current >= -200.0f && temp_current <= 1300.0f) {
+                  snprintf(lcd_buffer, sizeof(lcd_buffer), "Temp: %6.2f %cC ", temp_current, 0xDF);
+              } else {
+                  snprintf(lcd_buffer, sizeof(lcd_buffer), "Out of Range!   ");
+              }
+          }
 
-	            LCDI2C_printstr(lcd_buffer);
-	        }
+          LCDI2C_printstr(lcd_buffer);
+      }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

@@ -4332,8 +4332,8 @@ int main(void)
  800238a:	4947      	ldr	r1, [pc, #284]	@ (80024a8 <main+0x160>)
  800238c:	4847      	ldr	r0, [pc, #284]	@ (80024ac <main+0x164>)
  800238e:	f7ff f841 	bl	8001414 <MAX31856_Init>
-    MAX31856_SetThermocoupleType(&max31856, MAX31856_TCTYPE_K);
- 8002392:	2103      	movs	r1, #3
+    MAX31856_SetThermocoupleType(&max31856, MAX31856_TCTYPE_S);
+ 8002392:	2106      	movs	r1, #6
  8002394:	4845      	ldr	r0, [pc, #276]	@ (80024ac <main+0x164>)
  8002396:	f7ff f8ad 	bl	80014f4 <MAX31856_SetThermocoupleType>
     MAX31856_SetNoiseFilter(&max31856, MAX31856_NOISE_FILTER_50HZ);
