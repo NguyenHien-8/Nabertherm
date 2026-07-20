@@ -158,6 +158,39 @@ typedef struct {
 #define MT_MAX_OUTPUT_2_1_MS             120.0f
 #define MT_MAX_OUTPUT_NEAR_MS             90.0f
 
+/* MODE_TIOT deadline-aware trajectory control.
+ * The original linear Setpoint only described where the temperature should be;
+ * it did not compensate for furnace lag. These constants add pace correction,
+ * heating-rate feed-forward, predictive coasting and a deadline completion gate.
+ */
+#define TIOT_TARGET_TOLERANCE_C             1.0f
+#define TIOT_RAW_TOLERANCE_C                2.0f
+#define TIOT_HARD_CUTOFF_C                  0.50f
+#define TIOT_KP                            35.0f
+#define TIOT_KI                             0.10f
+#define TIOT_KD                           250.0f
+#define TIOT_INTEGRAL_ENABLE_BAND_C        30.0f
+#define TIOT_PROFILE_LEAD_GAIN              1.20f
+#define TIOT_RATE_LEAD_TIME_MIN             1.20f
+#define TIOT_BASE_LEAD_TIME_MIN             1.00f
+#define TIOT_MAX_SETPOINT_LEAD_C           45.0f
+#define TIOT_INITIAL_FULL_POWER_RATE_C_MIN  5.0f
+#define TIOT_RATE_EST_ALPHA                 0.08f
+#define TIOT_RATE_EST_WARMUP_SEC           60U
+#define TIOT_RATE_EST_MIN_OUTPUT_MS       250.0f
+#define TIOT_RATE_EST_MIN_C_MIN             0.10f
+#define TIOT_RATE_EST_MIN_FULL_C_MIN        0.50f
+#define TIOT_RATE_EST_MAX_FULL_C_MIN       40.0f
+#define TIOT_RATE_FF_SAFETY_FACTOR          1.05f
+#define TIOT_PACE_BOOST_MS_PER_C           20.0f
+#define TIOT_RATE_BOOST_MS_PER_C_MIN       35.0f
+#define TIOT_COAST_ACTIVE_BAND_C           10.0f
+#define TIOT_THERMAL_LOOKAHEAD_MIN          2.50f
+#define TIOT_PREDICT_MARGIN_C               0.25f
+#define TIOT_NEAR_TARGET_OUTPUT_CAP_MS     350.0f
+#define TIOT_FINAL_OUTPUT_CAP_MS           180.0f
+#define TIOT_MIN_USEFUL_PULSE_MS            40.0f
+
 // Flash Storage Architecture
 // STM32F103C8T6 has 64KB Flash. Page 63 is the very last page (1KB size).
 // Using the last page ensures we do not accidentally overwrite application code.
@@ -284,6 +317,15 @@ float mt_precoast_output_ms = 0.0f;
 uint8_t last_control_interval = 0U;
 uint8_t last_control_mode = 0xFFU;
 
+/* MODE_TIOT deadline tracking diagnostics and adaptive furnace-rate estimate. */
+float tiot_ideal_temp_c = 0.0f;
+float tiot_command_setpoint_c = 0.0f;
+float tiot_required_rate_c_per_min = 0.0f;
+float tiot_full_power_rate_est_c_per_min = TIOT_INITIAL_FULL_POWER_RATE_C_MIN;
+float tiot_output_floor_ms = 0.0f;
+float tiot_predicted_temp_c = 0.0f;
+bool tiot_deadline_extension = false;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -306,6 +348,12 @@ static void Stop_Heating_Control(void);
 static bool Start_Profile(void);
 static void Advance_Profile_If_Needed(uint32_t current_run_seconds);
 static float Calculate_Profile_Setpoint(uint32_t current_run_seconds);
+static bool TIOT_Target_Reached(uint8_t interval_index);
+static float Calculate_TIOT_Control_Setpoint(uint32_t current_run_seconds,
+                                             float profile_setpoint);
+static void Update_TIOT_Rate_Estimate(void);
+static float Limit_TIOT_Output(float requested_output,
+                               uint32_t current_run_seconds);
 static void Reset_MT_Control(uint32_t now_ms);
 static void Update_Temperature_Rate(uint32_t now_ms);
 static void Apply_PID_Tunings(float kp, float ki, float kd);
@@ -416,6 +464,13 @@ static void Stop_Heating_Control(void) {
     mt_precoast_output_ms = 0.0f;
     last_control_interval = 0U;
     last_control_mode = 0xFFU;
+
+    tiot_ideal_temp_c = Input;
+    tiot_command_setpoint_c = Input;
+    tiot_required_rate_c_per_min = 0.0f;
+    tiot_output_floor_ms = 0.0f;
+    tiot_predicted_temp_c = Input;
+    tiot_deadline_extension = false;
 }
 
 static void Trip_Control_Fault(ControlFault_t fault) {
@@ -459,6 +514,13 @@ static bool Start_Profile(void) {
     Apply_PID_Tunings(MT_APPROACH_KP, 0.0f, MT_APPROACH_KD);
     ki_is_active = false;
     windowStartTime = HAL_GetTick();
+    tiot_full_power_rate_est_c_per_min = TIOT_INITIAL_FULL_POWER_RATE_C_MIN;
+    tiot_ideal_temp_c = Input;
+    tiot_command_setpoint_c = Input;
+    tiot_required_rate_c_per_min = 0.0f;
+    tiot_output_floor_ms = 0.0f;
+    tiot_predicted_temp_c = Input;
+    tiot_deadline_extension = false;
     Reset_MT_Control(windowStartTime);
 
     /* Immediately skip any zero-duration segments without heating them. */
@@ -472,16 +534,44 @@ static void Advance_Profile_If_Needed(uint32_t current_run_seconds) {
     while (System_Run_State == SYS_RUNNING &&
            current_run_seconds >= Target_Run_Seconds &&
            guard < MAX_INTERVALS) {
+        const uint8_t finished_index = Current_Interval - 1U;
+        const uint32_t finished_duration =
+            Interval_Duration_Seconds(finished_index);
+        const bool finished_is_tiot =
+            (Intervals[finished_index].Mode == MODE_TIOT);
+
+        /* A non-zero TIOT interval is not allowed to finish 20 degC below target.
+         * When the programmed deadline is reached, remain in the same segment
+         * and command the final target until both filtered and raw temperatures
+         * are inside the acceptance band. This is also the fallback for an
+         * unrealistically short/infeasible programmed ramp.
+         */
+        if (finished_is_tiot && finished_duration > 0U &&
+            !TIOT_Target_Reached(finished_index)) {
+            tiot_deadline_extension = true;
+            return;
+        }
+
+        tiot_deadline_extension = false;
         guard++;
 
         if (Current_Interval < Total_Intervals) {
-            const float boundary_setpoint = (float)Intervals[Current_Interval - 1U].Temp;
-            const uint32_t boundary_time = Target_Run_Seconds;
+            /* If TIOT needed extra time, anchor the next interval to the actual
+             * completion time. Otherwise the cumulative clock would instantly
+             * skip one or more following intervals.
+             */
+            const uint32_t boundary_time =
+                (current_run_seconds > Target_Run_Seconds)
+                    ? current_run_seconds
+                    : Target_Run_Seconds;
 
             Current_Interval++;
             Current_Interval_Start_Sec = boundary_time;
-            Current_Interval_Start_Temp = boundary_setpoint;
-            Target_Run_Seconds += Interval_Duration_Seconds(Current_Interval - 1U);
+            Current_Interval_Start_Temp =
+                sensor_has_valid_sample ? Input
+                                        : (float)Intervals[finished_index].Temp;
+            Target_Run_Seconds = boundary_time +
+                Interval_Duration_Seconds(Current_Interval - 1U);
             LCD_Needs_Update = true;
         } else {
             System_Run_State = SYS_COMPLETED;
@@ -512,6 +602,261 @@ static float Calculate_Profile_Setpoint(uint32_t current_run_seconds) {
     if (ramp_setpoint < 0.0f) ramp_setpoint = 0.0f;
     if (ramp_setpoint > (float)PROCESS_MAX_TEMP_C) ramp_setpoint = (float)PROCESS_MAX_TEMP_C;
     return ramp_setpoint;
+}
+
+static bool TIOT_Target_Reached(uint8_t interval_index) {
+    if (interval_index >= MAX_INTERVALS ||
+        !sensor_has_valid_sample ||
+        !isfinite(Input) ||
+        !isfinite(raw_temp)) {
+        return false;
+    }
+
+    const float target_temp = (float)Intervals[interval_index].Temp;
+
+    /* TIOT is defined as an increasing-temperature mode. For a falling target
+     * the heater cannot force the deadline, so do not deadlock the profile.
+     */
+    if (target_temp < (Current_Interval_Start_Temp - TIOT_TARGET_TOLERANCE_C)) {
+        return true;
+    }
+
+    return (fabsf(Input - target_temp) <= TIOT_TARGET_TOLERANCE_C) &&
+           (fabsf(raw_temp - target_temp) <= TIOT_RAW_TOLERANCE_C);
+}
+
+static float Calculate_TIOT_Control_Setpoint(uint32_t current_run_seconds,
+                                             float profile_setpoint) {
+    const uint8_t index = Current_Interval - 1U;
+    const float target_temp = (float)Intervals[index].Temp;
+    const uint32_t duration_sec = Interval_Duration_Seconds(index);
+
+    tiot_ideal_temp_c = profile_setpoint;
+    tiot_required_rate_c_per_min = 0.0f;
+
+    if (duration_sec == 0U ||
+        target_temp <= Current_Interval_Start_Temp) {
+        tiot_command_setpoint_c = target_temp;
+        return target_temp;
+    }
+
+    const uint32_t remaining_sec =
+        (Target_Run_Seconds > current_run_seconds)
+            ? (Target_Run_Seconds - current_run_seconds)
+            : 0U;
+    const float remaining_error = target_temp - Input;
+    const float planned_rate_c_per_min =
+        ((target_temp - Current_Interval_Start_Temp) * 60.0f) /
+        (float)duration_sec;
+
+    if (remaining_sec > 0U && remaining_error > 0.0f) {
+        const float remaining_min = (float)remaining_sec / 60.0f;
+        tiot_required_rate_c_per_min = remaining_error / remaining_min;
+    } else if (remaining_error > TIOT_TARGET_TOLERANCE_C) {
+        /* Deadline already expired: maximum deadline pressure until target is met. */
+        tiot_required_rate_c_per_min =
+            TIOT_RATE_EST_MAX_FULL_C_MIN;
+    }
+
+    if (tiot_required_rate_c_per_min > TIOT_RATE_EST_MAX_FULL_C_MIN) {
+        tiot_required_rate_c_per_min = TIOT_RATE_EST_MAX_FULL_C_MIN;
+    }
+    if (tiot_required_rate_c_per_min < 0.0f) {
+        tiot_required_rate_c_per_min = 0.0f;
+    }
+
+    const float pace_error = profile_setpoint - Input;
+    const float positive_rate =
+        (temp_rate_c_per_min > 0.0f) ? temp_rate_c_per_min : 0.0f;
+    const float rate_deficit =
+        tiot_required_rate_c_per_min - positive_rate;
+
+    float lead_c = planned_rate_c_per_min * TIOT_BASE_LEAD_TIME_MIN;
+    if (pace_error > 0.0f) {
+        lead_c += pace_error * TIOT_PROFILE_LEAD_GAIN;
+    }
+    if (rate_deficit > 0.0f) {
+        lead_c += rate_deficit * TIOT_RATE_LEAD_TIME_MIN;
+    }
+
+    if (lead_c < 0.0f) lead_c = 0.0f;
+    if (lead_c > TIOT_MAX_SETPOINT_LEAD_C) {
+        lead_c = TIOT_MAX_SETPOINT_LEAD_C;
+    }
+
+    float command_setpoint = profile_setpoint + lead_c;
+    if (remaining_sec == 0U) command_setpoint = target_temp;
+    if (command_setpoint > target_temp) command_setpoint = target_temp;
+    if (command_setpoint < 0.0f) command_setpoint = 0.0f;
+    if (command_setpoint > (float)PROCESS_MAX_TEMP_C) {
+        command_setpoint = (float)PROCESS_MAX_TEMP_C;
+    }
+
+    tiot_command_setpoint_c = command_setpoint;
+    return command_setpoint;
+}
+
+static void Update_TIOT_Rate_Estimate(void) {
+    if (System_Run_State != SYS_RUNNING ||
+        last_control_mode != MODE_TIOT ||
+        active_output < TIOT_RATE_EST_MIN_OUTPUT_MS ||
+        temp_rate_c_per_min < TIOT_RATE_EST_MIN_C_MIN) {
+        return;
+    }
+
+    const uint8_t index = Current_Interval - 1U;
+    const uint32_t interval_elapsed_sec =
+        Run_Total_Seconds - Current_Interval_Start_Sec;
+    const float target_error = (float)Intervals[index].Temp - Input;
+
+    /* Ignore startup thermal delay and final coasting. Otherwise stored heat
+     * would be incorrectly interpreted as the instantaneous heater gain.
+     */
+    if (interval_elapsed_sec < TIOT_RATE_EST_WARMUP_SEC ||
+        target_error <= TIOT_COAST_ACTIVE_BAND_C) {
+        return;
+    }
+
+    float observed_full_rate =
+        temp_rate_c_per_min * ((float)WINDOW_SIZE / active_output);
+
+    if (!isfinite(observed_full_rate)) return;
+    if (observed_full_rate < TIOT_RATE_EST_MIN_FULL_C_MIN) {
+        observed_full_rate = TIOT_RATE_EST_MIN_FULL_C_MIN;
+    } else if (observed_full_rate > TIOT_RATE_EST_MAX_FULL_C_MIN) {
+        observed_full_rate = TIOT_RATE_EST_MAX_FULL_C_MIN;
+    }
+
+    tiot_full_power_rate_est_c_per_min +=
+        TIOT_RATE_EST_ALPHA *
+        (observed_full_rate - tiot_full_power_rate_est_c_per_min);
+}
+
+static float Limit_TIOT_Output(float requested_output,
+                               uint32_t current_run_seconds) {
+    const uint8_t index = Current_Interval - 1U;
+    const float target_temp = (float)Intervals[index].Temp;
+    const uint32_t duration_sec = Interval_Duration_Seconds(index);
+    const uint32_t remaining_sec =
+        (Target_Run_Seconds > current_run_seconds)
+            ? (Target_Run_Seconds - current_run_seconds)
+            : 0U;
+    const float target_error = target_temp - Input;
+    const float pace_error = tiot_ideal_temp_c - Input;
+    const float positive_rate =
+        (temp_rate_c_per_min > 0.0f) ? temp_rate_c_per_min : 0.0f;
+    const float rate_deficit =
+        tiot_required_rate_c_per_min - positive_rate;
+
+    if (duration_sec == 0U || target_temp <= Current_Interval_Start_Temp) {
+        if (Input >= target_temp) {
+            Output = 0.0f;
+            pid_heater.outputSum = 0.0f;
+            tiot_output_floor_ms = 0.0f;
+            return 0.0f;
+        }
+        return requested_output;
+    }
+
+    if (Input >= (target_temp + TIOT_HARD_CUTOFF_C) ||
+        raw_temp >= (target_temp + TIOT_HARD_CUTOFF_C)) {
+        Output = 0.0f;
+        pid_heater.outputSum = 0.0f;
+        tiot_output_floor_ms = 0.0f;
+        return 0.0f;
+    }
+
+    /* Feed-forward asks for the duty ratio needed to produce the heating rate
+     * required by the remaining temperature/time. The estimated full-power rate
+     * is learned online from the furnace instead of assuming one fixed model.
+     */
+    float rate_est = tiot_full_power_rate_est_c_per_min;
+    if (rate_est < TIOT_RATE_EST_MIN_FULL_C_MIN) {
+        rate_est = TIOT_RATE_EST_MIN_FULL_C_MIN;
+    }
+
+    float rate_feedforward_ms =
+        (tiot_required_rate_c_per_min / rate_est) *
+        (float)WINDOW_SIZE * TIOT_RATE_FF_SAFETY_FACTOR;
+    float corrective_floor_ms = 0.0f;
+
+    if (pace_error > 0.0f) {
+        corrective_floor_ms +=
+            pace_error * TIOT_PACE_BOOST_MS_PER_C;
+    }
+    if (rate_deficit > 0.0f) {
+        corrective_floor_ms +=
+            rate_deficit * TIOT_RATE_BOOST_MS_PER_C_MIN;
+    }
+
+    tiot_output_floor_ms =
+        (rate_feedforward_ms > corrective_floor_ms)
+            ? rate_feedforward_ms
+            : corrective_floor_ms;
+
+    if (remaining_sec == 0U &&
+        target_error > TIOT_TARGET_TOLERANCE_C) {
+        tiot_output_floor_ms = (float)WINDOW_SIZE;
+    }
+
+    if (tiot_output_floor_ms < 0.0f) tiot_output_floor_ms = 0.0f;
+    if (tiot_output_floor_ms > (float)WINDOW_SIZE) {
+        tiot_output_floor_ms = (float)WINDOW_SIZE;
+    }
+
+    float limited_output = requested_output;
+    if (limited_output < tiot_output_floor_ms) {
+        limited_output = tiot_output_floor_ms;
+    }
+
+    /* Near the final target, use measured rise rate to coast before stored heat
+     * produces overshoot. This cutoff is intentionally limited to the final band
+     * so it cannot recreate the original 20 degC deadline lag.
+     */
+    tiot_predicted_temp_c =
+        Input + (positive_rate * TIOT_THERMAL_LOOKAHEAD_MIN);
+
+    if (target_error <= TIOT_COAST_ACTIVE_BAND_C &&
+        positive_rate >= MT_MIN_RISING_RATE_C_PER_MIN &&
+        tiot_predicted_temp_c >=
+            (target_temp - TIOT_PREDICT_MARGIN_C)) {
+        limited_output = 0.0f;
+        Output = 0.0f;
+        pid_heater.outputSum = 0.0f;
+    } else {
+        float output_cap_ms = (float)WINDOW_SIZE;
+        if (target_error <= 1.5f) {
+            output_cap_ms = TIOT_FINAL_OUTPUT_CAP_MS;
+        } else if (target_error <= 4.0f) {
+            output_cap_ms = TIOT_NEAR_TARGET_OUTPUT_CAP_MS;
+        }
+
+        if (limited_output > output_cap_ms) {
+            limited_output = output_cap_ms;
+        }
+        if (pid_heater.outputSum > output_cap_ms) {
+            pid_heater.outputSum = output_cap_ms;
+        }
+    }
+
+    if (target_error <= 0.0f) {
+        limited_output = 0.0f;
+        Output = 0.0f;
+        pid_heater.outputSum = 0.0f;
+    }
+
+    if (limited_output > OUTPUT_DEADBAND_MS &&
+        limited_output < TIOT_MIN_USEFUL_PULSE_MS &&
+        (pace_error > 0.50f || rate_deficit > 0.20f)) {
+        limited_output = TIOT_MIN_USEFUL_PULSE_MS;
+    }
+    if (limited_output < 0.0f) limited_output = 0.0f;
+    if (limited_output > (float)WINDOW_SIZE) {
+        limited_output = (float)WINDOW_SIZE;
+    }
+
+    if (Output > limited_output) Output = limited_output;
+    return limited_output;
 }
 
 static void Reset_MT_Control(uint32_t now_ms) {
@@ -559,6 +904,7 @@ static void Update_Temperature_Rate(uint32_t now_ms) {
         TEMP_RATE_FILTER_ALPHA * (instant_rate - temp_rate_c_per_min);
     temp_rate_last_temp = Input;
     temp_rate_last_time_ms = now_ms;
+    Update_TIOT_Rate_Estimate();
 }
 
 static void Apply_PID_Tunings(float kp, float ki, float kd) {
@@ -811,8 +1157,6 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
         return;
     }
 
-    Setpoint = Calculate_Profile_Setpoint(current_run_seconds);
-
     const uint8_t interval_index = Current_Interval - 1U;
     const uint8_t interval_mode = Intervals[interval_index].Mode;
     const bool is_mt_mode = (interval_mode == MODE_MT);
@@ -832,11 +1176,26 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
         last_control_interval = Current_Interval;
         last_control_mode = interval_mode;
 
+        tiot_ideal_temp_c = Input;
+        tiot_command_setpoint_c = Input;
+        tiot_required_rate_c_per_min = 0.0f;
+        tiot_output_floor_ms = 0.0f;
+        tiot_predicted_temp_c = Input;
+        tiot_deadline_extension = false;
+
         if (!is_mt_mode) {
-            /* Always enter TIOT with its own non-integrating profile first. */
-            Apply_PID_Tunings(Kp, 0.0f, Kd);
+            /* Enter TIOT with a deadline-aware controller. Integral is enabled
+             * only after the trajectory error is bounded. */
+            Apply_PID_Tunings(TIOT_KP, 0.0f, TIOT_KD);
         }
     }
+
+    const float profile_setpoint =
+        Calculate_Profile_Setpoint(current_run_seconds);
+    Setpoint = is_mt_mode
+        ? profile_setpoint
+        : Calculate_TIOT_Control_Setpoint(current_run_seconds,
+                                          profile_setpoint);
 
     if (PID_GetMode(&pid_heater) != PID_AUTOMATIC) {
         PID_SetMode(&pid_heater, PID_AUTOMATIC);
@@ -861,18 +1220,22 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
             pid_heater.outputSum = 0.0f;
         }
     } else {
-        /* Preserve the original TIOT behavior and PID gains. */
         mt_control_phase = MT_PHASE_APPROACH;
-        mt_predicted_temp_c = Input;
+        mt_predicted_temp_c = tiot_predicted_temp_c;
         mt_output_limit_ms = (float)WINDOW_SIZE;
 
-        if (abs_error > INTEGRAL_DISABLE_BAND_C) {
-            Apply_PID_Tunings(Kp, 0.0f, Kd);
-        } else if (abs_error < INTEGRAL_ENABLE_BAND_C) {
-            Apply_PID_Tunings(Kp, Ki, Kd);
+        /* TIOT needs integral earlier than the original +/-4 degC zone, because
+         * zero integral during most of the ramp is the main reason the plant
+         * follows the programmed trajectory with a large steady lag.
+         */
+        if (abs_error <= TIOT_INTEGRAL_ENABLE_BAND_C) {
+            Apply_PID_Tunings(TIOT_KP, TIOT_KI, TIOT_KD);
+        } else {
+            Apply_PID_Tunings(TIOT_KP, 0.0f, TIOT_KD);
+            pid_heater.outputSum = 0.0f;
         }
 
-        if (error < -HEATER_CUTOFF_ABOVE_SP_C) {
+        if (error < -TIOT_HARD_CUTOFF_C) {
             pid_heater.outputSum = 0.0f;
         }
     }
@@ -883,11 +1246,9 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
 
     if (is_mt_mode) {
         active_output = Limit_MT_Output(active_output, Setpoint, Input);
-    } else if (Input > (Setpoint + HEATER_CUTOFF_ABOVE_SP_C) ||
-               raw_temp > (Setpoint + HEATER_CUTOFF_ABOVE_SP_C)) {
-        active_output = 0.0f;
-        Output = 0.0f;
-        pid_heater.outputSum = 0.0f;
+    } else {
+        active_output =
+            Limit_TIOT_Output(active_output, current_run_seconds);
     }
 
     if (active_output < 0.0f) active_output = 0.0f;
