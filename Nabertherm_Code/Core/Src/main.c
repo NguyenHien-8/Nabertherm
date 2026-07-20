@@ -70,6 +70,13 @@ typedef enum {
     CONTROL_FAULT_OVERTEMP
 } ControlFault_t;
 
+/* MODE_MT supervisory phases for a high-inertia furnace. */
+typedef enum {
+    MT_PHASE_APPROACH = 0, /* Heat toward the target with power tapering. */
+    MT_PHASE_COAST,        /* SSR OFF while stored heat continues to raise temperature. */
+    MT_PHASE_HOLD          /* Tight PID regulation around the requested Setpoint. */
+} MTControlPhase_t;
+
 /* * Data structure for a single heating interval (Segment).
  * Grouped into a struct for memory contiguity and easy array management.
  */
@@ -106,11 +113,50 @@ typedef struct {
 #define OVERTEMP_RESET_C                 (1250.0f)
 #define TEMP_FILTER_ALPHA                (0.20f)
 
-/* PID supervisory thresholds. The PID gains still require real-furnace tuning. */
+/* TIOT keeps the original PID zoning. MODE_MT uses its own tighter controller. */
 #define INTEGRAL_ENABLE_BAND_C             4.0f
 #define INTEGRAL_DISABLE_BAND_C           10.0f
 #define HEATER_CUTOFF_ABOVE_SP_C           1.5f
 #define OUTPUT_DEADBAND_MS                20.0f
+
+/* MODE_MT predictive anti-overshoot and hold-control parameters.
+ * These are conservative starting values for the 3 kW Nabertherm furnace.
+ * Final +/-1 degC performance must be verified and tuned on the real furnace/load.
+ */
+#define TEMP_RATE_UPDATE_MS             5000U
+#define TEMP_RATE_FILTER_ALPHA             0.25f
+#define TEMP_RATE_MAX_ABS_C_PER_MIN       80.0f
+
+#define MT_TARGET_TOLERANCE_C              1.0f
+#define MT_HARD_CUTOFF_C                   0.50f
+#define MT_PREDICT_MARGIN_C                0.30f
+#define MT_THERMAL_LOOKAHEAD_MIN           4.0f
+#define MT_PREDICT_ACTIVE_BAND_C          12.0f
+#define MT_MIN_RISING_RATE_C_PER_MIN       0.08f
+#define MT_HOLD_ENTRY_ERROR_C              1.50f
+#define MT_HOLD_ENTRY_RATE_C_PER_MIN       0.20f
+#define MT_REHEAT_ERROR_C                  3.00f
+#define MT_COAST_RELEASE_ERROR_C           1.00f
+#define MT_COAST_RELEASE_RATE_C_PER_MIN    0.15f
+#define MT_HOLD_MIN_PULSE_MS              40.0f
+#define MT_HOLD_BIAS_FRACTION              0.25f
+
+/* Gain scheduling: no integral during approach/coast; stronger PI action in hold. */
+#define MT_APPROACH_KP                    20.0f
+#define MT_APPROACH_KD                   250.0f
+#define MT_HOLD_KP                        80.0f
+#define MT_HOLD_KI                         0.40f
+#define MT_HOLD_KD                       300.0f
+
+/* Maximum SSR ON time in each 1000 ms window while approaching Setpoint. */
+#define MT_MAX_OUTPUT_FAR_MS            1000.0f
+#define MT_MAX_OUTPUT_40_20_MS           800.0f
+#define MT_MAX_OUTPUT_20_10_MS           550.0f
+#define MT_MAX_OUTPUT_10_5_MS            320.0f
+#define MT_MAX_OUTPUT_5_3_MS             220.0f
+#define MT_MAX_OUTPUT_3_2_MS             160.0f
+#define MT_MAX_OUTPUT_2_1_MS             120.0f
+#define MT_MAX_OUTPUT_NEAR_MS             90.0f
 
 // Flash Storage Architecture
 // STM32F103C8T6 has 64KB Flash. Page 63 is the very last page (1KB size).
@@ -226,6 +272,18 @@ char prev_lcd_row2[17] = {0}; // Cache for Row 2
 uint32_t last_temp_read_time = 0;
 bool flash_write_ok = true;
 
+/* MODE_MT state, temperature-rate estimator and transition memory. */
+float temp_rate_c_per_min = 0.0f;
+float temp_rate_last_temp = 0.0f;
+uint32_t temp_rate_last_time_ms = 0U;
+bool temp_rate_initialized = false;
+MTControlPhase_t mt_control_phase = MT_PHASE_APPROACH;
+float mt_predicted_temp_c = 0.0f;
+float mt_output_limit_ms = 0.0f;
+float mt_precoast_output_ms = 0.0f;
+uint8_t last_control_interval = 0U;
+uint8_t last_control_mode = 0xFFU;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -248,6 +306,12 @@ static void Stop_Heating_Control(void);
 static bool Start_Profile(void);
 static void Advance_Profile_If_Needed(uint32_t current_run_seconds);
 static float Calculate_Profile_Setpoint(uint32_t current_run_seconds);
+static void Reset_MT_Control(uint32_t now_ms);
+static void Update_Temperature_Rate(uint32_t now_ms);
+static void Apply_PID_Tunings(float kp, float ki, float kd);
+static float MT_Hold_Output_Cap(float target_temp);
+static void Update_MT_Control_Phase(float target_temp, float input_temp);
+static float Limit_MT_Output(float requested_output, float target_temp, float input_temp);
 static void Read_Temperature_Task(uint32_t now_ms);
 static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds);
 static void Trip_Control_Fault(ControlFault_t fault);
@@ -346,6 +410,12 @@ static void Stop_Heating_Control(void) {
     Output = 0.0f;
     active_output = 0.0f;
     pid_heater.outputSum = 0.0f;
+    mt_control_phase = MT_PHASE_APPROACH;
+    mt_predicted_temp_c = Input;
+    mt_output_limit_ms = 0.0f;
+    mt_precoast_output_ms = 0.0f;
+    last_control_interval = 0U;
+    last_control_mode = 0xFFU;
 }
 
 static void Trip_Control_Fault(ControlFault_t fault) {
@@ -386,9 +456,10 @@ static bool Start_Profile(void) {
     pid_heater.outputSum = 0.0f;
     pid_heater.lastInput = Input;
     pid_heater.lastTime = HAL_GetTick() - pid_heater.SampleTime;
-    PID_SetTunings(&pid_heater, Kp, 0.0f, Kd, PID_P_ON_E);
+    Apply_PID_Tunings(MT_APPROACH_KP, 0.0f, MT_APPROACH_KD);
     ki_is_active = false;
     windowStartTime = HAL_GetTick();
+    Reset_MT_Control(windowStartTime);
 
     /* Immediately skip any zero-duration segments without heating them. */
     Advance_Profile_If_Needed(0U);
@@ -443,6 +514,224 @@ static float Calculate_Profile_Setpoint(uint32_t current_run_seconds) {
     return ramp_setpoint;
 }
 
+static void Reset_MT_Control(uint32_t now_ms) {
+    mt_control_phase = MT_PHASE_APPROACH;
+    mt_predicted_temp_c = Input;
+    mt_output_limit_ms = 0.0f;
+    mt_precoast_output_ms = 0.0f;
+
+    temp_rate_c_per_min = 0.0f;
+    temp_rate_last_temp = Input;
+    temp_rate_last_time_ms = now_ms;
+    temp_rate_initialized = sensor_has_valid_sample && isfinite(Input);
+
+    last_control_interval = 0U;
+    last_control_mode = 0xFFU;
+}
+
+static void Update_Temperature_Rate(uint32_t now_ms) {
+    if (!sensor_has_valid_sample || !isfinite(Input)) return;
+
+    if (!temp_rate_initialized) {
+        temp_rate_c_per_min = 0.0f;
+        temp_rate_last_temp = Input;
+        temp_rate_last_time_ms = now_ms;
+        temp_rate_initialized = true;
+        return;
+    }
+
+    const uint32_t elapsed_ms = now_ms - temp_rate_last_time_ms;
+    if (elapsed_ms < TEMP_RATE_UPDATE_MS) return;
+
+    const float elapsed_min = (float)elapsed_ms / 60000.0f;
+    if (elapsed_min <= 0.0f) return;
+
+    float instant_rate = (Input - temp_rate_last_temp) / elapsed_min;
+    if (!isfinite(instant_rate)) instant_rate = 0.0f;
+
+    if (instant_rate > TEMP_RATE_MAX_ABS_C_PER_MIN) {
+        instant_rate = TEMP_RATE_MAX_ABS_C_PER_MIN;
+    } else if (instant_rate < -TEMP_RATE_MAX_ABS_C_PER_MIN) {
+        instant_rate = -TEMP_RATE_MAX_ABS_C_PER_MIN;
+    }
+
+    temp_rate_c_per_min +=
+        TEMP_RATE_FILTER_ALPHA * (instant_rate - temp_rate_c_per_min);
+    temp_rate_last_temp = Input;
+    temp_rate_last_time_ms = now_ms;
+}
+
+static void Apply_PID_Tunings(float kp, float ki, float kd) {
+    const bool changed =
+        (fabsf(PID_GetKp(&pid_heater) - kp) > 0.0001f) ||
+        (fabsf(PID_GetKi(&pid_heater) - ki) > 0.0001f) ||
+        (fabsf(PID_GetKd(&pid_heater) - kd) > 0.0001f);
+
+    if (changed) {
+        PID_SetTunings(&pid_heater, kp, ki, kd, PID_P_ON_E);
+    }
+    ki_is_active = (ki > 0.0f);
+}
+
+static float MT_Hold_Output_Cap(float target_temp) {
+    /* Heat loss rises strongly with furnace temperature. This adaptive ceiling
+     * avoids an unrealistically small hold duty at high Setpoints while still
+     * limiting stored heat at low Setpoints.
+     */
+    float cap_ms = 180.0f + (0.45f * target_temp);
+    if (cap_ms < 250.0f) cap_ms = 250.0f;
+    if (cap_ms > 850.0f) cap_ms = 850.0f;
+    return cap_ms;
+}
+
+static void Enter_MT_Phase(MTControlPhase_t new_phase, float target_temp) {
+    if (new_phase == mt_control_phase) return;
+
+    if (new_phase == MT_PHASE_COAST) {
+        if (active_output > 0.0f) mt_precoast_output_ms = active_output;
+        Output = 0.0f;
+        active_output = 0.0f;
+        pid_heater.outputSum = 0.0f;
+    } else if (new_phase == MT_PHASE_APPROACH) {
+        Output = 0.0f;
+        active_output = 0.0f;
+        pid_heater.outputSum = 0.0f;
+    } else { /* MT_PHASE_HOLD */
+        float initial_bias = mt_precoast_output_ms * MT_HOLD_BIAS_FRACTION;
+        const float hold_cap = MT_Hold_Output_Cap(target_temp);
+        if (initial_bias > hold_cap) initial_bias = hold_cap;
+        if (initial_bias < 0.0f) initial_bias = 0.0f;
+        pid_heater.outputSum = initial_bias;
+        Output = initial_bias;
+        active_output = initial_bias;
+        pid_heater.lastInput = Input;
+        pid_heater.lastTime = HAL_GetTick() - pid_heater.SampleTime;
+    }
+
+    mt_control_phase = new_phase;
+}
+
+static void Update_MT_Control_Phase(float target_temp, float input_temp) {
+    const float error = target_temp - input_temp;
+    const float rising_rate =
+        (temp_rate_c_per_min > 0.0f) ? temp_rate_c_per_min : 0.0f;
+
+    mt_predicted_temp_c = input_temp +
+                          (rising_rate * MT_THERMAL_LOOKAHEAD_MIN);
+
+    switch (mt_control_phase) {
+        case MT_PHASE_APPROACH:
+            if (input_temp >= (target_temp + MT_HARD_CUTOFF_C) ||
+                raw_temp >= (target_temp + MT_HARD_CUTOFF_C)) {
+                Enter_MT_Phase(MT_PHASE_COAST, target_temp);
+            } else if (error <= MT_PREDICT_ACTIVE_BAND_C &&
+                       rising_rate >= MT_MIN_RISING_RATE_C_PER_MIN &&
+                       mt_predicted_temp_c >= (target_temp - MT_PREDICT_MARGIN_C)) {
+                /* Stored heat is predicted to carry the furnace to Setpoint. */
+                Enter_MT_Phase(MT_PHASE_COAST, target_temp);
+            } else if (fabsf(error) <= MT_HOLD_ENTRY_ERROR_C &&
+                       fabsf(temp_rate_c_per_min) <= MT_HOLD_ENTRY_RATE_C_PER_MIN) {
+                Enter_MT_Phase(MT_PHASE_HOLD, target_temp);
+            }
+            break;
+
+        case MT_PHASE_COAST:
+            if (error > MT_REHEAT_ERROR_C && temp_rate_c_per_min <= 0.0f) {
+                Enter_MT_Phase(MT_PHASE_APPROACH, target_temp);
+            } else if ((error >= MT_COAST_RELEASE_ERROR_C &&
+                        temp_rate_c_per_min <= MT_COAST_RELEASE_RATE_C_PER_MIN) ||
+                       (fabsf(error) <= MT_HOLD_ENTRY_ERROR_C &&
+                        fabsf(temp_rate_c_per_min) <= MT_HOLD_ENTRY_RATE_C_PER_MIN)) {
+                Enter_MT_Phase(MT_PHASE_HOLD, target_temp);
+            }
+            break;
+
+        case MT_PHASE_HOLD:
+        default:
+            if (input_temp >= (target_temp + MT_HARD_CUTOFF_C) ||
+                raw_temp >= (target_temp + MT_HARD_CUTOFF_C) ||
+                (temp_rate_c_per_min > MT_HOLD_ENTRY_RATE_C_PER_MIN &&
+                 mt_predicted_temp_c >= (target_temp + MT_HARD_CUTOFF_C))) {
+                Enter_MT_Phase(MT_PHASE_COAST, target_temp);
+            } else if (error > MT_REHEAT_ERROR_C) {
+                Enter_MT_Phase(MT_PHASE_APPROACH, target_temp);
+            }
+            break;
+    }
+}
+
+static float Limit_MT_Output(float requested_output,
+                             float target_temp,
+                             float input_temp) {
+    float limited_output = requested_output;
+    const float error = target_temp - input_temp;
+
+    if (mt_control_phase == MT_PHASE_COAST ||
+        input_temp >= (target_temp + MT_HARD_CUTOFF_C) ||
+        raw_temp >= (target_temp + MT_HARD_CUTOFF_C)) {
+        Output = 0.0f;
+        pid_heater.outputSum = 0.0f;
+        mt_output_limit_ms = 0.0f;
+        return 0.0f;
+    }
+
+    if (mt_control_phase == MT_PHASE_APPROACH) {
+        if (error <= 0.0f) {
+            Output = 0.0f;
+            pid_heater.outputSum = 0.0f;
+            mt_output_limit_ms = 0.0f;
+            return 0.0f;
+        }
+
+        if (error > 40.0f) {
+            mt_output_limit_ms = MT_MAX_OUTPUT_FAR_MS;
+        } else if (error > 20.0f) {
+            mt_output_limit_ms = MT_MAX_OUTPUT_40_20_MS;
+        } else if (error > 10.0f) {
+            mt_output_limit_ms = MT_MAX_OUTPUT_20_10_MS;
+        } else if (error > 5.0f) {
+            mt_output_limit_ms = MT_MAX_OUTPUT_10_5_MS;
+        } else if (error > 3.0f) {
+            mt_output_limit_ms = MT_MAX_OUTPUT_5_3_MS;
+        } else if (error > 2.0f) {
+            mt_output_limit_ms = MT_MAX_OUTPUT_3_2_MS;
+        } else if (error > 1.0f) {
+            mt_output_limit_ms = MT_MAX_OUTPUT_2_1_MS;
+        } else {
+            mt_output_limit_ms = MT_MAX_OUTPUT_NEAR_MS;
+        }
+    } else { /* MT_PHASE_HOLD */
+        mt_output_limit_ms = MT_Hold_Output_Cap(target_temp);
+
+        /* A heater cannot actively cool. Stop heating immediately above target. */
+        if (error <= 0.0f) {
+            limited_output = 0.0f;
+        }
+
+        /* If the furnace is below target and cooling, guarantee one useful
+         * 50 Hz SSR pulse instead of losing a command in the deadband.
+         */
+        if (error > 0.25f && temp_rate_c_per_min < 0.0f &&
+            limited_output > 0.0f && limited_output < MT_HOLD_MIN_PULSE_MS) {
+            limited_output = MT_HOLD_MIN_PULSE_MS;
+        }
+    }
+
+    if (limited_output > mt_output_limit_ms) {
+        limited_output = mt_output_limit_ms;
+    }
+    if (limited_output < 0.0f) limited_output = 0.0f;
+
+    /* Back-calculation by clamping the stored integral to the real actuator limit. */
+    if (pid_heater.outputSum > mt_output_limit_ms) {
+        pid_heater.outputSum = mt_output_limit_ms;
+    }
+    if (pid_heater.outputSum < 0.0f) pid_heater.outputSum = 0.0f;
+    if (Output > limited_output) Output = limited_output;
+
+    return limited_output;
+}
+
 static void Read_Temperature_Task(uint32_t now_ms) {
     if ((uint32_t)(now_ms - last_temp_read_time) < SENSOR_SAMPLE_MS) return;
     last_temp_read_time = now_ms;
@@ -485,6 +774,7 @@ static void Read_Temperature_Task(uint32_t now_ms) {
     Current_Temp = filtered_temp;
     Input = filtered_temp;
     sensor_has_valid_sample = true;
+    Update_Temperature_Rate(now_ms);
 
     if (measured >= OVERTEMP_TRIP_C || filtered_temp >= OVERTEMP_TRIP_C) {
         valid_recovery_count = 0U;
@@ -523,6 +813,31 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
 
     Setpoint = Calculate_Profile_Setpoint(current_run_seconds);
 
+    const uint8_t interval_index = Current_Interval - 1U;
+    const uint8_t interval_mode = Intervals[interval_index].Mode;
+    const bool is_mt_mode = (interval_mode == MODE_MT);
+
+    /* Reset the supervisory state only when entering a new segment/mode.
+     * TIOT changes Setpoint every second, so Setpoint changes alone must not reset it.
+     */
+    if (last_control_interval != Current_Interval ||
+        last_control_mode != interval_mode) {
+        mt_control_phase = MT_PHASE_APPROACH;
+        mt_predicted_temp_c = Input;
+        mt_output_limit_ms = 0.0f;
+        mt_precoast_output_ms = 0.0f;
+        pid_heater.outputSum = 0.0f;
+        Output = 0.0f;
+        active_output = 0.0f;
+        last_control_interval = Current_Interval;
+        last_control_mode = interval_mode;
+
+        if (!is_mt_mode) {
+            /* Always enter TIOT with its own non-integrating profile first. */
+            Apply_PID_Tunings(Kp, 0.0f, Kd);
+        }
+    }
+
     if (PID_GetMode(&pid_heater) != PID_AUTOMATIC) {
         PID_SetMode(&pid_heater, PID_AUTOMATIC);
     }
@@ -530,26 +845,46 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
     const float error = Setpoint - Input;
     const float abs_error = fabsf(error);
 
-    /* A falling setpoint cannot be followed actively by a heater. Remove stored I bias. */
-    if (Setpoint < (last_setpoint - 0.25f) || error < -HEATER_CUTOFF_ABOVE_SP_C) {
+    /* A decreasing trajectory cannot be followed actively by a heater. */
+    if (Setpoint < (last_setpoint - 0.25f)) {
         pid_heater.outputSum = 0.0f;
     }
 
-    if (abs_error > INTEGRAL_DISABLE_BAND_C && ki_is_active) {
-        PID_SetTunings(&pid_heater, Kp, 0.0f, Kd, PID_P_ON_E);
-        ki_is_active = false;
-    } else if (abs_error < INTEGRAL_ENABLE_BAND_C && !ki_is_active) {
-        PID_SetTunings(&pid_heater, Kp, Ki, Kd, PID_P_ON_E);
-        ki_is_active = true;
+    if (is_mt_mode) {
+        Update_MT_Control_Phase(Setpoint, Input);
+
+        if (mt_control_phase == MT_PHASE_HOLD) {
+            Apply_PID_Tunings(MT_HOLD_KP, MT_HOLD_KI, MT_HOLD_KD);
+        } else {
+            /* Approach and coast never integrate stored heat demand. */
+            Apply_PID_Tunings(MT_APPROACH_KP, 0.0f, MT_APPROACH_KD);
+            pid_heater.outputSum = 0.0f;
+        }
+    } else {
+        /* Preserve the original TIOT behavior and PID gains. */
+        mt_control_phase = MT_PHASE_APPROACH;
+        mt_predicted_temp_c = Input;
+        mt_output_limit_ms = (float)WINDOW_SIZE;
+
+        if (abs_error > INTEGRAL_DISABLE_BAND_C) {
+            Apply_PID_Tunings(Kp, 0.0f, Kd);
+        } else if (abs_error < INTEGRAL_ENABLE_BAND_C) {
+            Apply_PID_Tunings(Kp, Ki, Kd);
+        }
+
+        if (error < -HEATER_CUTOFF_ABOVE_SP_C) {
+            pid_heater.outputSum = 0.0f;
+        }
     }
 
     if (PID_Compute(&pid_heater)) {
         active_output = Output;
     }
 
-    /* Hard supervisory cutoff prevents residual integral from heating above the trajectory. */
-    if (Input > (Setpoint + HEATER_CUTOFF_ABOVE_SP_C) ||
-        raw_temp > (Setpoint + HEATER_CUTOFF_ABOVE_SP_C)) {
+    if (is_mt_mode) {
+        active_output = Limit_MT_Output(active_output, Setpoint, Input);
+    } else if (Input > (Setpoint + HEATER_CUTOFF_ABOVE_SP_C) ||
+               raw_temp > (Setpoint + HEATER_CUTOFF_ABOVE_SP_C)) {
         active_output = 0.0f;
         Output = 0.0f;
         pid_heater.outputSum = 0.0f;
@@ -559,14 +894,19 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
     if (active_output > (float)WINDOW_SIZE) active_output = (float)WINDOW_SIZE;
     last_setpoint = Setpoint;
 
-    const uint32_t ms_in_window = (uint32_t)(now_ms - windowStartTime) % WINDOW_SIZE;
+    /* Time-proportional SSR drive: active_output is ON-time in a 1000 ms window. */
+    const uint32_t ms_in_window =
+        (uint32_t)(now_ms - windowStartTime) % WINDOW_SIZE;
+
     if (active_output <= OUTPUT_DEADBAND_MS) {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
     } else if (active_output >= ((float)WINDOW_SIZE - OUTPUT_DEADBAND_MS)) {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);
     } else {
         HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7,
-                          (ms_in_window < (uint32_t)active_output) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+                          (ms_in_window < (uint32_t)active_output)
+                              ? GPIO_PIN_SET
+                              : GPIO_PIN_RESET);
     }
 }
 
