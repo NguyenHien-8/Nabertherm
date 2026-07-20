@@ -150,7 +150,7 @@ typedef struct {
 
 // ================= PID PARAMETTERS & NOISE FILTER =================
 float Input, Output, Setpoint;
-float Kp = 20.0f, Ki = 0.02f, Kd = 270.0f;
+float Kp = 20.0f, Ki = 0.02f, Kd = 250.0f;
 uint32_t windowStartTime = 0;
 float active_output = 0;
 float filtered_temp = -1.0f;
