@@ -34,4 +34,4 @@
 ../Core/Src/main.c:1805:13:MX_SPI1_Init	2
 ../Core/Src/main.c:1843:13:MX_TIM2_Init	4
 ../Core/Src/main.c:1888:13:MX_GPIO_Init	1
-../Core/Src/main.c:1952:6:Error_Handler	1
+../Core/Src/main.c:1945:6:Error_Handler	1
