@@ -29,9 +29,9 @@
 ../Core/Src/main.c:1572:6:Save_Settings_To_Flash	10
 ../Core/Src/main.c:1625:6:Load_Settings_From_Flash	7
 ../Core/Src/main.c:1647:5:main	2
-../Core/Src/main.c:1731:6:SystemClock_Config	3
-../Core/Src/main.c:1771:13:MX_I2C2_Init	2
-../Core/Src/main.c:1805:13:MX_SPI1_Init	2
-../Core/Src/main.c:1843:13:MX_TIM2_Init	4
-../Core/Src/main.c:1888:13:MX_GPIO_Init	1
-../Core/Src/main.c:1945:6:Error_Handler	1
+../Core/Src/main.c:1733:6:SystemClock_Config	3
+../Core/Src/main.c:1773:13:MX_I2C2_Init	2
+../Core/Src/main.c:1807:13:MX_SPI1_Init	2
+../Core/Src/main.c:1845:13:MX_TIM2_Init	4
+../Core/Src/main.c:1890:13:MX_GPIO_Init	1
+../Core/Src/main.c:1947:6:Error_Handler	1
