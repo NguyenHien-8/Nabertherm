@@ -1,0 +1,274 @@
+--- main(7).c
++++ main_MT_fixed.c
+@@ -128,35 +128,53 @@
+ #define TEMP_RATE_MAX_ABS_C_PER_MIN       80.0f
+ 
+ #define MT_TARGET_TOLERANCE_C              1.0f
+-#define MT_HARD_CUTOFF_C                   0.50f
+-#define MT_PREDICT_MARGIN_C                0.30f
+-#define MT_THERMAL_LOOKAHEAD_MIN           4.0f
+-#define MT_PREDICT_ACTIVE_BAND_C          12.0f
+-#define MT_MIN_RISING_RATE_C_PER_MIN       0.08f
+-#define MT_HOLD_ENTRY_ERROR_C              1.50f
+-#define MT_HOLD_ENTRY_RATE_C_PER_MIN       0.20f
+-#define MT_REHEAT_ERROR_C                  1.50f
+-#define MT_COAST_RELEASE_ERROR_C           1.00f
+-#define MT_COAST_RELEASE_RATE_C_PER_MIN    0.15f
++#define MT_HARD_CUTOFF_C                   0.30f
++
++/* MT soft-landing:
++ * The previous 4-minute look-ahead could switch the SSR OFF about 10...12 degC
++ * before Setpoint on this furnace. Use the already-observed furnace coast scale
++ * (~0.42 min) and only predictively coast very near the target.
++ */
++#define MT_PREDICT_MARGIN_C                0.20f
++#define MT_THERMAL_LOOKAHEAD_MIN           0.42f
++#define MT_PREDICT_ACTIVE_BAND_C           2.50f
++#define MT_MIN_RISING_RATE_C_PER_MIN       0.15f
++
++/* Enter/leave HOLD around the requested tolerance band.
++ * Small deviations stay in HOLD so the integral is not repeatedly erased.
++ */
++#define MT_HOLD_ENTRY_ERROR_C              1.00f
++#define MT_HOLD_ENTRY_RATE_C_PER_MIN       0.80f
++#define MT_REHEAT_ERROR_C                  3.00f
++#define MT_COAST_RELEASE_ERROR_C           0.60f
++#define MT_COAST_RELEASE_RATE_C_PER_MIN    0.30f
+ #define MT_HOLD_MIN_PULSE_MS              40.0f
+-#define MT_HOLD_BIAS_FRACTION              0.25f
++#define MT_HOLD_BIAS_FRACTION              0.75f
++#define MT_HOLD_BIAS_CAP_FRACTION          0.35f
++#define MT_HOLD_FLOOR_START_ERROR_C        0.60f
++#define MT_HOLD_RECOVERY_ERROR_C           0.90f
++#define MT_HOLD_FLOOR_FRACTION             0.35f
++#define MT_HOLD_RECOVERY_FRACTION          0.55f
+ 
+ /* Gain scheduling: no integral during approach/coast; stronger PI action in hold. */
+-#define MT_APPROACH_KP                    20.0f
+-#define MT_APPROACH_KD                   250.0f
+-#define MT_HOLD_KP                        80.0f
+-#define MT_HOLD_KI                         0.40f
+-#define MT_HOLD_KD                       300.0f
+-
+-/* Maximum SSR ON time in each 1000 ms window while approaching Setpoint. */
++#define MT_APPROACH_KP                    25.0f
++#define MT_APPROACH_KD                   180.0f
++#define MT_HOLD_KP                       120.0f
++#define MT_HOLD_KI                         2.00f
++#define MT_HOLD_KD                       180.0f
++
++/* Maximum SSR ON time in each 1000 ms window while approaching Setpoint.
++ * Keep enough authority near target to overcome furnace heat loss; predictive
++ * coast now handles overshoot instead of starving the heater 10 degC early.
++ */
+ #define MT_MAX_OUTPUT_FAR_MS            1000.0f
+-#define MT_MAX_OUTPUT_40_20_MS           800.0f
+-#define MT_MAX_OUTPUT_20_10_MS           550.0f
+-#define MT_MAX_OUTPUT_10_5_MS            320.0f
+-#define MT_MAX_OUTPUT_5_3_MS             220.0f
+-#define MT_MAX_OUTPUT_3_2_MS             160.0f
+-#define MT_MAX_OUTPUT_2_1_MS             120.0f
+-#define MT_MAX_OUTPUT_NEAR_MS             90.0f
++#define MT_MAX_OUTPUT_40_20_MS           900.0f
++#define MT_MAX_OUTPUT_20_10_MS           750.0f
++#define MT_MAX_OUTPUT_10_5_MS            550.0f
++#define MT_MAX_OUTPUT_5_3_MS             450.0f
++#define MT_MAX_OUTPUT_3_2_MS             350.0f
++#define MT_MAX_OUTPUT_2_1_MS             280.0f
++#define MT_MAX_OUTPUT_NEAR_MS            220.0f
+ 
+ /* MODE_TIOT fixed-deadline trajectory control.
+  * Design goals:
+@@ -398,6 +416,7 @@
+ static void Update_Temperature_Rate(uint32_t now_ms);
+ static void Apply_PID_Tunings(float kp, float ki, float kd);
+ static float MT_Hold_Output_Cap(float target_temp);
++static float MT_Hold_Initial_Bias(float target_temp);
+ static void Update_MT_Control_Phase(float target_temp, float input_temp);
+ static float Limit_MT_Output(float requested_output, float target_temp, float input_temp);
+ static void Read_Temperature_Task(uint32_t now_ms);
+@@ -1072,6 +1091,24 @@
+     return cap_ms;
+ }
+ 
++static float MT_Hold_Initial_Bias(float target_temp) {
++    /* Do not enter HOLD with an almost-empty integral.
++     *
++     * mt_precoast_output_ms remembers the latest useful approach/coast demand.
++     * The second term provides a conservative temperature-dependent loss bias
++     * even when HOLD is entered directly from APPROACH.
++     */
++    const float hold_cap = MT_Hold_Output_Cap(target_temp);
++    float bias_from_previous = mt_precoast_output_ms * MT_HOLD_BIAS_FRACTION;
++    float bias_from_loss = hold_cap * MT_HOLD_BIAS_CAP_FRACTION;
++    float initial_bias =
++        (bias_from_previous > bias_from_loss) ? bias_from_previous : bias_from_loss;
++
++    if (initial_bias > hold_cap) initial_bias = hold_cap;
++    if (initial_bias < 0.0f) initial_bias = 0.0f;
++    return initial_bias;
++}
++
+ static void Enter_MT_Phase(MTControlPhase_t new_phase, float target_temp) {
+     if (new_phase == mt_control_phase) return;
+ 
+@@ -1085,10 +1122,7 @@
+         active_output = 0.0f;
+         pid_heater.outputSum = 0.0f;
+     } else { /* MT_PHASE_HOLD */
+-        float initial_bias = mt_precoast_output_ms * MT_HOLD_BIAS_FRACTION;
+-        const float hold_cap = MT_Hold_Output_Cap(target_temp);
+-        if (initial_bias > hold_cap) initial_bias = hold_cap;
+-        if (initial_bias < 0.0f) initial_bias = 0.0f;
++        const float initial_bias = MT_Hold_Initial_Bias(target_temp);
+         pid_heater.outputSum = initial_bias;
+         Output = initial_bias;
+         active_output = initial_bias;
+@@ -1109,27 +1143,45 @@
+ 
+     switch (mt_control_phase) {
+         case MT_PHASE_APPROACH:
++            /* Actual over-temperature always has highest priority. */
+             if (input_temp >= (target_temp + MT_HARD_CUTOFF_C) ||
+                 raw_temp >= (target_temp + MT_HARD_CUTOFF_C)) {
+                 Enter_MT_Phase(MT_PHASE_COAST, target_temp);
+-            } else if (error <= MT_PREDICT_ACTIVE_BAND_C &&
+-                       rising_rate >= MT_MIN_RISING_RATE_C_PER_MIN &&
+-                       mt_predicted_temp_c >= (target_temp - MT_PREDICT_MARGIN_C)) {
+-                /* Stored heat is predicted to carry the furnace to Setpoint. */
++            }
++            /* Predictive coast is only allowed very near target.  This removes
++             * the old failure mode where a 4-minute prediction switched the SSR
++             * off around 10...12 degC too early.
++             */
++            else if (error <= MT_PREDICT_ACTIVE_BAND_C &&
++                     rising_rate >= MT_MIN_RISING_RATE_C_PER_MIN &&
++                     mt_predicted_temp_c >=
++                         (target_temp + MT_PREDICT_MARGIN_C)) {
+                 Enter_MT_Phase(MT_PHASE_COAST, target_temp);
+-            } else if (fabsf(error) <= MT_HOLD_ENTRY_ERROR_C &&
+-                       fabsf(temp_rate_c_per_min) <= MT_HOLD_ENTRY_RATE_C_PER_MIN) {
++            }
++            /* Once inside the -1 degC tolerance band, hand over to HOLD even
++             * if the furnace is still moving slowly. HOLD has its own derivative
++             * braking and can immediately supply the heat-loss bias.
++             */
++            else if (error <= MT_HOLD_ENTRY_ERROR_C &&
++                     error >= -MT_HARD_CUTOFF_C) {
+                 Enter_MT_Phase(MT_PHASE_HOLD, target_temp);
+             }
+             break;
+ 
+         case MT_PHASE_COAST:
+-            if (error > MT_REHEAT_ERROR_C && temp_rate_c_per_min <= 0.0f) {
++            /* Never remain with SSR fully OFF while the furnace has fallen to
++             * the bottom of the allowed band. Re-enter HOLD before a deep drop.
++             */
++            if (error >= MT_TARGET_TOLERANCE_C) {
++                Enter_MT_Phase(MT_PHASE_HOLD, target_temp);
++            } else if (error > MT_REHEAT_ERROR_C &&
++                       temp_rate_c_per_min <= 0.0f) {
+                 Enter_MT_Phase(MT_PHASE_APPROACH, target_temp);
+             } else if ((error >= MT_COAST_RELEASE_ERROR_C &&
+                         temp_rate_c_per_min <= MT_COAST_RELEASE_RATE_C_PER_MIN) ||
+                        (fabsf(error) <= MT_HOLD_ENTRY_ERROR_C &&
+-                        fabsf(temp_rate_c_per_min) <= MT_HOLD_ENTRY_RATE_C_PER_MIN)) {
++                        fabsf(temp_rate_c_per_min) <=
++                            MT_HOLD_ENTRY_RATE_C_PER_MIN)) {
+                 Enter_MT_Phase(MT_PHASE_HOLD, target_temp);
+             }
+             break;
+@@ -1139,9 +1191,13 @@
+             if (input_temp >= (target_temp + MT_HARD_CUTOFF_C) ||
+                 raw_temp >= (target_temp + MT_HARD_CUTOFF_C) ||
+                 (temp_rate_c_per_min > MT_HOLD_ENTRY_RATE_C_PER_MIN &&
+-                 mt_predicted_temp_c >= (target_temp + MT_HARD_CUTOFF_C))) {
++                 mt_predicted_temp_c >=
++                     (target_temp + MT_PREDICT_MARGIN_C))) {
+                 Enter_MT_Phase(MT_PHASE_COAST, target_temp);
+             } else if (error > MT_REHEAT_ERROR_C) {
++                /* A large disturbance still uses APPROACH, but ordinary
++                 * 0...1 degC hold errors do NOT clear the integral anymore.
++                 */
+                 Enter_MT_Phase(MT_PHASE_APPROACH, target_temp);
+             }
+             break;
+@@ -1188,20 +1244,54 @@
+         } else {
+             mt_output_limit_ms = MT_MAX_OUTPUT_NEAR_MS;
+         }
++
++        /* Remember the real near-target actuator demand so HOLD can start
++         * bumplessly instead of starting from almost zero output.
++         */
++        if (limited_output > mt_output_limit_ms) {
++            limited_output = mt_output_limit_ms;
++        }
++        if (limited_output > 0.0f) {
++            mt_precoast_output_ms = limited_output;
++        }
+     } else { /* MT_PHASE_HOLD */
+-        mt_output_limit_ms = MT_Hold_Output_Cap(target_temp);
+-
+-        /* A heater cannot actively cool. Stop heating immediately above target. */
++        const float hold_cap = MT_Hold_Output_Cap(target_temp);
++        mt_output_limit_ms = hold_cap;
++
++        /* A heater cannot actively cool. Stop heating immediately at/above target.
++         * Stored heat will be handled by COAST if the measured/predicted
++         * temperature exceeds the small positive margin.
++         */
+         if (error <= 0.0f) {
+             limited_output = 0.0f;
+-        }
+-
+-        /* If the furnace is below target and cooling, guarantee one useful
+-         * 50 Hz SSR pulse instead of losing a command in the deadband.
+-         */
+-        if (error > 0.25f && temp_rate_c_per_min < 0.0f &&
+-            limited_output > 0.0f && limited_output < MT_HOLD_MIN_PULSE_MS) {
+-            limited_output = MT_HOLD_MIN_PULSE_MS;
++        } else {
++            /* Anti-droop floor:
++             * When temperature approaches Setpoint-1 degC, guarantee enough
++             * heating authority to arrest the decline. This floor is applied
++             * after PID so a derivative kick/noise cannot starve the heater.
++             */
++            float hold_floor_ms = 0.0f;
++
++            if (error >= MT_HOLD_RECOVERY_ERROR_C) {
++                hold_floor_ms = hold_cap * MT_HOLD_RECOVERY_FRACTION;
++            } else if (error >= MT_HOLD_FLOOR_START_ERROR_C &&
++                       temp_rate_c_per_min <=
++                           MT_COAST_RELEASE_RATE_C_PER_MIN) {
++                hold_floor_ms = hold_cap * MT_HOLD_FLOOR_FRACTION;
++            }
++
++            if (limited_output < hold_floor_ms) {
++                limited_output = hold_floor_ms;
++            }
++
++            /* Guarantee at least one useful SSR pulse while below target and
++             * cooling; otherwise the 20 ms deadband can erase a small command.
++             */
++            if (error > 0.20f && temp_rate_c_per_min < 0.0f &&
++                limited_output > 0.0f &&
++                limited_output < MT_HOLD_MIN_PULSE_MS) {
++                limited_output = MT_HOLD_MIN_PULSE_MS;
++            }
+         }
+     }
+ 
+@@ -1215,7 +1305,11 @@
+         pid_heater.outputSum = mt_output_limit_ms;
+     }
+     if (pid_heater.outputSum < 0.0f) pid_heater.outputSum = 0.0f;
+-    if (Output > limited_output) Output = limited_output;
++
++    /* Keep the PID-visible Output aligned with the actual limited command.
++     * This reduces bumps when moving between APPROACH / HOLD.
++     */
++    Output = limited_output;
+ 
+     return limited_output;
+ }

@@ -1,0 +1,34 @@
+MODE_MT fix summary
+
+Goal
+- Keep MODE_MT close to the requested Setpoint, targeting Setpoint ... Setpoint-1 degC.
+- MODE_TIOT is not modified.
+
+Main changes
+1. Predictive coast:
+   - MT_THERMAL_LOOKAHEAD_MIN: 4.0 -> 0.42 min.
+   - MT_PREDICT_ACTIVE_BAND_C: 12.0 -> 2.5 degC.
+   This prevents SSR shutoff about 10...12 degC before target.
+
+2. HOLD entry/recovery:
+   - Enter HOLD at <=1.0 degC below Setpoint.
+   - COAST cannot remain fully OFF once temperature reaches Setpoint-1 degC.
+   - Small errors remain in HOLD so PID integral is not repeatedly reset.
+
+3. HOLD bias / anti-droop:
+   - HOLD starts with a thermal-loss bias based on previous useful output and hold cap.
+   - Anti-droop minimum output activates from 0.6 degC below Setpoint and becomes stronger at 0.9 degC.
+
+4. PID MT gains:
+   - APPROACH: Kp=25, Ki=0, Kd=180
+   - HOLD: Kp=120, Ki=2.0, Kd=180
+   These are starting values for the current furnace and should be verified experimentally.
+
+5. Near-target approach power caps were increased so heater authority is not starved before target.
+
+Recommended test
+- First test at a moderate Setpoint with no valuable load.
+- Log every 5 s: Setpoint, Input, raw_temp, temp_rate_c_per_min, mt_control_phase, active_output.
+- Observe at least 15-30 min after first reaching Setpoint.
+- If overshoot >1 degC: reduce MT_HOLD_RECOVERY_FRACTION or MT_MAX_OUTPUT_2_1_MS.
+- If temperature still falls below Setpoint-1 degC: increase MT_HOLD_FLOOR_FRACTION / MT_HOLD_RECOVERY_FRACTION slightly.
