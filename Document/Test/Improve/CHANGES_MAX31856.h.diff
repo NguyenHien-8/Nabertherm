@@ -1,0 +1,157 @@
+--- MAX31856(3).h
++++ Core/Inc/MAX31856.h
+@@ -1,7 +1,10 @@
+ /*
+  * @file MAX31856.h
+  * Author: TRAN NGUYEN HIEN
+- * Email: trannguyenhien29085@gmail.com
++ * Reliability update:
++ * - Finite SPI timeouts (no HAL_MAX_DELAY)
++ * - Bounded retry
++ * - Latched communication error/status diagnostics
+  */
+ 
+ #ifndef MAX31856_H
+@@ -15,49 +18,55 @@
+ #include <stdint.h>
+ #include <stdbool.h>
+ 
++/* SPI reliability settings.
++ * A MAX31856 transfer is only a few bytes, so 10 ms is already very generous.
++ * Two complete transaction attempts tolerate a transient EMI disturbance while
++ * still guaranteeing that control returns to the main loop quickly.
++ */
++#define MAX31856_SPI_TIMEOUT_MS        10U
++#define MAX31856_SPI_MAX_ATTEMPTS       2U
++
+ /* The registers of MAX31856 */
+-#define MAX31856_CR0_REG 0x00         ///< Config 0 register
+-#define MAX31856_CR0_AUTOCONVERT 0x80 ///< Config 0 Auto convert flag
+-#define MAX31856_CR0_1SHOT 0x40       ///< Config 0 one shot convert flag
+-#define MAX31856_CR0_OCFAULT1 0x20    ///< Config 0 open circuit fault 1 flag
+-#define MAX31856_CR0_OCFAULT0 0x10    ///< Config 0 open circuit fault 0 flag
+-#define MAX31856_CR0_CJ 0x08          ///< Config 0 cold junction disable flag
+-#define MAX31856_CR0_FAULT 0x04       ///< Config 0 fault mode flag
+-#define MAX31856_CR0_FAULTCLR 0x02    ///< Config 0 fault clear flag
++#define MAX31856_CR0_REG 0x00
++#define MAX31856_CR0_AUTOCONVERT 0x80
++#define MAX31856_CR0_1SHOT       0x40
++#define MAX31856_CR0_OCFAULT1    0x20
++#define MAX31856_CR0_OCFAULT0    0x10
++#define MAX31856_CR0_CJ          0x08
++#define MAX31856_CR0_FAULT       0x04
++#define MAX31856_CR0_FAULTCLR    0x02
+ 
+-#define MAX31856_CR1_REG 0x01  ///< Config 1 register
+-#define MAX31856_MASK_REG 0x02 ///< Fault Mask register
+-#define MAX31856_CJHF_REG 0x03 ///< Cold junction High temp fault register
+-#define MAX31856_CJLF_REG 0x04 ///< Cold junction Low temp fault register
+-#define MAX31856_LTHFTH_REG 0x05 ///< Linearized Temperature High Fault Threshold Register, MSB
+-#define MAX31856_LTHFTL_REG 0x06 ///< Linearized Temperature High Fault Threshold Register, LSB
+-#define MAX31856_LTLFTH_REG 0x07 ///< Linearized Temperature Low Fault Threshold Register, MSB
+-#define MAX31856_LTLFTL_REG 0x08 ///< Linearized Temperature Low Fault Threshold Register, LSB
+-#define MAX31856_CJTO_REG 0x09  ///< Cold-Junction Temperature Offset Register
+-#define MAX31856_CJTH_REG 0x0A  ///< Cold-Junction Temperature Register, MSB
+-#define MAX31856_CJTL_REG 0x0B  ///< Cold-Junction Temperature Register, LSB
+-#define MAX31856_LTCBH_REG 0x0C ///< Linearized TC Temperature, Byte 2
+-#define MAX31856_LTCBM_REG 0x0D ///< Linearized TC Temperature, Byte 1
+-#define MAX31856_LTCBL_REG 0x0E ///< Linearized TC Temperature, Byte 0
+-#define MAX31856_SR_REG 0x0F    ///< Fault Status Register
++#define MAX31856_CR1_REG   0x01
++#define MAX31856_MASK_REG  0x02
++#define MAX31856_CJHF_REG  0x03
++#define MAX31856_CJLF_REG  0x04
++#define MAX31856_LTHFTH_REG 0x05
++#define MAX31856_LTHFTL_REG 0x06
++#define MAX31856_LTLFTH_REG 0x07
++#define MAX31856_LTLFTL_REG 0x08
++#define MAX31856_CJTO_REG    0x09
++#define MAX31856_CJTH_REG    0x0A
++#define MAX31856_CJTL_REG    0x0B
++#define MAX31856_LTCBH_REG   0x0C
++#define MAX31856_LTCBM_REG   0x0D
++#define MAX31856_LTCBL_REG   0x0E
++#define MAX31856_SR_REG      0x0F
+ 
+ /* ERROR FLAG */
+-#define MAX31856_FAULT_CJRANGE 0x80 ///< Fault status Cold Junction Out-of-Range flag
+-#define MAX31856_FAULT_TCRANGE 0x40 ///< Fault status Thermocouple Out-of-Range flag
+-#define MAX31856_FAULT_CJHIGH  0x20 ///< Fault status Cold-Junction High Fault flag
+-#define MAX31856_FAULT_CJLOW   0x10 ///< Fault status Cold-Junction Low Fault flag
+-#define MAX31856_FAULT_TCHIGH  0x08 ///< Fault status Thermocouple Temperature High Fault flag
+-#define MAX31856_FAULT_TCLOW   0x04 ///< Fault status Thermocouple Temperature Low Fault flag
+-#define MAX31856_FAULT_OVUV    0x02 ///< Fault status Overvoltage or Undervoltage Input Fault flag
+-#define MAX31856_FAULT_OPEN    0x01 ///< Fault status Thermocouple Open-Circuit Fault flag
++#define MAX31856_FAULT_CJRANGE 0x80
++#define MAX31856_FAULT_TCRANGE 0x40
++#define MAX31856_FAULT_CJHIGH  0x20
++#define MAX31856_FAULT_CJLOW   0x10
++#define MAX31856_FAULT_TCHIGH  0x08
++#define MAX31856_FAULT_TCLOW   0x04
++#define MAX31856_FAULT_OVUV    0x02
++#define MAX31856_FAULT_OPEN    0x01
+ 
+-/** Noise filtering options enum. Use with setNoiseFilter() */
+ typedef enum {
+   MAX31856_NOISE_FILTER_50HZ,
+   MAX31856_NOISE_FILTER_60HZ
+ } max31856_noise_filter_t;
+ 
+-/** Multiple types of thermocouples supported */
+ typedef enum {
+   MAX31856_TCTYPE_B = 0b0000,
+   MAX31856_TCTYPE_E = 0b0001,
+@@ -71,24 +80,31 @@
+   MAX31856_VMODE_G32 = 0b1100,
+ } max31856_thermocoupletype_t;
+ 
+-/** Temperature conversion mode */
+ typedef enum {
+   MAX31856_ONESHOT,
+   MAX31856_ONESHOT_NOWAIT,
+   MAX31856_CONTINUOUS
+ } max31856_conversion_mode_t;
+ 
+-/** Device management structure */
+ typedef struct {
+-  SPI_HandleTypeDef *hspi;         // (Ex: &hspi1)
+-  GPIO_TypeDef      *cs_port;      // (Ex: GPIOA)
+-  uint16_t          cs_pin;        // (Ex: GPIO_PIN_4)
+-  max31856_conversion_mode_t conversionMode; // Save current mode
+-  bool              initialized;
++  SPI_HandleTypeDef *hspi;
++  GPIO_TypeDef      *cs_port;
++  uint16_t           cs_pin;
++  max31856_conversion_mode_t conversionMode;
++  bool               initialized;
++
++  /* Reliability diagnostics.
++   * communication_error is latched until MAX31856_ClearCommunicationError().
++   * This prevents a later successful SPI transaction from hiding a failure that
++   * occurred earlier in the same application-level operation.
++   */
++  bool               communication_error;
++  HAL_StatusTypeDef  last_hal_status;
++  uint32_t           communication_error_count;
+ } MAX31856_HandleTypeDef;
+ 
+-/* Declare control functions */
+-bool MAX31856_Init(MAX31856_HandleTypeDef *dev, SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_port, uint16_t cs_pin);
++bool MAX31856_Init(MAX31856_HandleTypeDef *dev, SPI_HandleTypeDef *hspi,
++                   GPIO_TypeDef *cs_port, uint16_t cs_pin);
+ 
+ void MAX31856_SetConversionMode(MAX31856_HandleTypeDef *dev, max31856_conversion_mode_t mode);
+ max31856_conversion_mode_t MAX31856_GetConversionMode(MAX31856_HandleTypeDef *dev);
+@@ -108,6 +124,12 @@
+ void MAX31856_SetColdJunctionFaultThreshholds(MAX31856_HandleTypeDef *dev, int8_t low, int8_t high);
+ void MAX31856_SetNoiseFilter(MAX31856_HandleTypeDef *dev, max31856_noise_filter_t noiseFilter);
+ 
++/* Communication health API. */
++void MAX31856_ClearCommunicationError(MAX31856_HandleTypeDef *dev);
++bool MAX31856_HasCommunicationError(const MAX31856_HandleTypeDef *dev);
++HAL_StatusTypeDef MAX31856_GetLastHALStatus(const MAX31856_HandleTypeDef *dev);
++uint32_t MAX31856_GetCommunicationErrorCount(const MAX31856_HandleTypeDef *dev);
++
+ #ifdef __cplusplus
+ }
+ #endif

@@ -42,7 +42,6 @@
 typedef enum {
     SYS_IDLE,       // Power on or manually stopped. Timer does not increment.
     SYS_RUNNING,    // Active heating phase. Timer increments 1Hz.
-    SYS_PAUSED,     // Process timeline frozen; SSR is forced OFF until resumed.
     SYS_COMPLETED   // All intervals finished. Timer stops, retains last time.
 } SystemState_t;
 
@@ -218,8 +217,8 @@ typedef struct {
  * constant-rate look-ahead. 0.35 min is the initial estimate from the latest
  * test where the 0.70 min model predicted roughly twice the useful coast rise.
  */
-#define TIOT_BRAKE_TIME_MIN                 0.60f
-#define TIOT_ENDPOINT_MARGIN_C              1.5f
+#define TIOT_BRAKE_TIME_MIN                 0.42f
+#define TIOT_ENDPOINT_MARGIN_C              0.50f
 #define TIOT_BRAKE_CAP_HEADROOM_MS         70.0f
 #define TIOT_MIN_USEFUL_PULSE_MS            40.0f
 
@@ -381,12 +380,6 @@ float mt_precoast_output_ms = 0.0f;
 uint8_t last_control_interval = 0U;
 uint8_t last_control_mode = 0xFFU;
 
-/* Pause/resume snapshots. The PID integral and last real actuator demand are
- * retained so continuing the process does not behave like a new profile.
- */
-float paused_pid_output_sum = 0.0f;
-float paused_active_output_ms = 0.0f;
-
 /* MODE_TIOT deadline tracking diagnostics and adaptive furnace-rate estimate. */
 float tiot_ideal_temp_c = 0.0f;
 float tiot_command_setpoint_c = 0.0f;
@@ -423,8 +416,6 @@ static uint32_t Interval_Duration_Seconds(uint8_t interval_index);
 static void Sanitize_Settings(void);
 static void Commit_Pending_Edit(void);
 static void Stop_Heating_Control(void);
-static void Pause_Profile(void);
-static bool Resume_Profile(void);
 static bool Start_Profile(void);
 static void Advance_Profile_If_Needed(uint32_t current_run_seconds);
 static float Calculate_Profile_Setpoint(uint32_t current_run_seconds);
@@ -552,67 +543,6 @@ static void Stop_Heating_Control(void) {
     tiot_required_rate_c_per_min = 0.0f;
     tiot_output_floor_ms = 0.0f;
     tiot_predicted_temp_c = Input;
-}
-
-static void Pause_Profile(void) {
-    if (System_Run_State != SYS_RUNNING) return;
-
-    /* Capture the controller state before suppressing the physical output.
-     * Run_Total_Seconds is frozen by the TIM2 callback once SYS_PAUSED is set.
-     */
-    paused_pid_output_sum = pid_heater.outputSum;
-    paused_active_output_ms = active_output;
-
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    System_Run_State = SYS_PAUSED;
-    if (primask == 0U) __enable_irq();
-
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
-    if (PID_GetMode(&pid_heater) != PID_MANUAL) {
-        PID_SetMode(&pid_heater, PID_MANUAL);
-    }
-    Output = 0.0f;
-    active_output = 0.0f;
-    windowStartTime = HAL_GetTick();
-}
-
-static bool Resume_Profile(void) {
-    if (System_Run_State != SYS_PAUSED ||
-        Control_Fault != CONTROL_FAULT_NONE ||
-        !sensor_has_valid_sample) {
-        return false;
-    }
-
-    const uint32_t now_ms = HAL_GetTick();
-
-    /* Restore the stored integral after PID_SetMode() performs its normal
-     * manual-to-auto initialization. Reset derivative history to the current
-     * temperature so cooling during a long pause cannot create a kick.
-     */
-    Output = paused_active_output_ms;
-    PID_SetMode(&pid_heater, PID_AUTOMATIC);
-    pid_heater.outputSum = paused_pid_output_sum;
-    if (pid_heater.outputSum < 0.0f) pid_heater.outputSum = 0.0f;
-    if (pid_heater.outputSum > (float)WINDOW_SIZE) {
-        pid_heater.outputSum = (float)WINDOW_SIZE;
-    }
-    pid_heater.lastInput = Input;
-    pid_heater.lastTime = now_ms - pid_heater.SampleTime;
-
-    /* Start a new slow-PWM window with the output still physically OFF. The
-     * regular control task computes the resumed demand in this same main loop.
-     */
-    Output = 0.0f;
-    active_output = 0.0f;
-    windowStartTime = now_ms;
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
-
-    uint32_t primask = __get_PRIMASK();
-    __disable_irq();
-    System_Run_State = SYS_RUNNING;
-    if (primask == 0U) __enable_irq();
-    return true;
 }
 
 static void Trip_Control_Fault(ControlFault_t fault) {
@@ -1172,16 +1102,6 @@ static float MT_Hold_Output_Cap(float target_temp) {
     float cap_ms = 180.0f + (0.45f * target_temp);
     if (cap_ms < 250.0f) cap_ms = 250.0f;
     if (cap_ms > 850.0f) cap_ms = 850.0f;
-
-    /* A fixed temperature-only ceiling can be lower than the real heat-loss
-     * duty of a particular load. Reuse the actuator demand that was already
-     * proven immediately before MT (especially the TIOT -> MT transition), so
-     * HOLD is not mathematically prevented from maintaining Setpoint.
-     */
-    if (mt_precoast_output_ms > cap_ms) {
-        cap_ms = mt_precoast_output_ms;
-    }
-    if (cap_ms > (float)WINDOW_SIZE) cap_ms = (float)WINDOW_SIZE;
     return cap_ms;
 }
 
@@ -1207,13 +1127,7 @@ static void Enter_MT_Phase(MTControlPhase_t new_phase, float target_temp) {
     if (new_phase == mt_control_phase) return;
 
     if (new_phase == MT_PHASE_COAST) {
-        /* Preserve the strongest recently-proven hold demand. In particular,
-         * do not replace the TIOT handover duty with the smaller startup bias
-         * if residual heat immediately sends the new MT interval to COAST.
-         */
-        if (active_output > mt_precoast_output_ms) {
-            mt_precoast_output_ms = active_output;
-        }
+        if (active_output > 0.0f) mt_precoast_output_ms = active_output;
         Output = 0.0f;
         active_output = 0.0f;
         pid_heater.outputSum = 0.0f;
@@ -1269,27 +1183,19 @@ static void Update_MT_Control_Phase(float target_temp, float input_temp) {
             break;
 
         case MT_PHASE_COAST:
-            /* A large, non-rising deficit needs APPROACH directly. This test
-             * must precede the ordinary HOLD release condition.
+            /* Never remain with SSR fully OFF while the furnace has fallen to
+             * the bottom of the allowed band. Re-enter HOLD before a deep drop.
              */
-            if (error > MT_REHEAT_ERROR_C &&
-                temp_rate_c_per_min <= MT_COAST_RELEASE_RATE_C_PER_MIN) {
+            if (error >= MT_TARGET_TOLERANCE_C) {
+                Enter_MT_Phase(MT_PHASE_HOLD, target_temp);
+            } else if (error > MT_REHEAT_ERROR_C &&
+                       temp_rate_c_per_min <= 0.0f) {
                 Enter_MT_Phase(MT_PHASE_APPROACH, target_temp);
-            }
-            /* Do not alternate COAST -> HOLD -> COAST while residual heat still
-             * predicts an overshoot. Release once the predicted temperature is
-             * safe, or once both error and measured rate are inside the normal
-             * HOLD-entry region.
-             */
-            else if ((error >= MT_TARGET_TOLERANCE_C &&
-                      mt_predicted_temp_c <= target_temp) ||
-                     (mt_predicted_temp_c <= target_temp &&
-                      ((error >= MT_COAST_RELEASE_ERROR_C &&
-                        temp_rate_c_per_min <=
-                            MT_COAST_RELEASE_RATE_C_PER_MIN) ||
+            } else if ((error >= MT_COAST_RELEASE_ERROR_C &&
+                        temp_rate_c_per_min <= MT_COAST_RELEASE_RATE_C_PER_MIN) ||
                        (fabsf(error) <= MT_HOLD_ENTRY_ERROR_C &&
                         fabsf(temp_rate_c_per_min) <=
-                            MT_HOLD_ENTRY_RATE_C_PER_MIN)))) {
+                            MT_HOLD_ENTRY_RATE_C_PER_MIN)) {
                 Enter_MT_Phase(MT_PHASE_HOLD, target_temp);
             }
             break;
@@ -1514,16 +1420,6 @@ static void Read_Temperature_Task(uint32_t now_ms) {
 }
 
 static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
-    if (System_Run_State == SYS_PAUSED) {
-        /* Pause is intentionally different from stop: keep the interval and
-         * controller memory, but guarantee that no SSR pulse can be emitted.
-         */
-        HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
-        Output = 0.0f;
-        active_output = 0.0f;
-        return;
-    }
-
     if (System_Run_State != SYS_RUNNING ||
         Control_Fault != CONTROL_FAULT_NONE ||
         !sensor_has_valid_sample) {
@@ -1540,12 +1436,6 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
      */
     if (last_control_interval != Current_Interval ||
         last_control_mode != interval_mode) {
-        /* Preserve the real duty delivered by the preceding segment before
-         * clearing PID state. MT uses it for a bumpless thermal handover; TIOT
-         * retains its existing initialization path below.
-         */
-        const float previous_active_output = active_output;
-
         mt_control_phase = MT_PHASE_APPROACH;
         mt_predicted_temp_c = Input;
         mt_output_limit_ms = 0.0f;
@@ -1563,31 +1453,7 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
         tiot_predicted_temp_c = Input;
         Reset_TIOT_Fast_Rate(now_ms);
 
-        if (is_mt_mode) {
-            const float mt_target = (float)Intervals[interval_index].Temp;
-            const float mt_entry_error = mt_target - Input;
-
-            /* The final TIOT duty already contains real information about this
-             * furnace/load. Retain it when MT starts at or below its target.
-             */
-            if (mt_entry_error >= 0.0f && previous_active_output > 0.0f) {
-                mt_precoast_output_ms = previous_active_output;
-                if (mt_precoast_output_ms > (float)WINDOW_SIZE) {
-                    mt_precoast_output_ms = (float)WINDOW_SIZE;
-                }
-            }
-
-            /* A TIOT -> MT handover commonly occurs only 1...3 degC below the
-             * target. Start in HOLD with the retained bias instead of starving
-             * the heater through a fresh zero-output APPROACH state.
-             */
-            if (mt_entry_error <= MT_REHEAT_ERROR_C &&
-                mt_entry_error >= -MT_HARD_CUTOFF_C) {
-                Enter_MT_Phase(MT_PHASE_HOLD, mt_target);
-            } else if (mt_entry_error < -MT_HARD_CUTOFF_C) {
-                mt_control_phase = MT_PHASE_COAST;
-            }
-        } else {
+        if (!is_mt_mode) {
             /* Enter TIOT with a deadline-aware controller. Integral is enabled
              * only after the trajectory error is bounded. */
             Apply_PID_Tunings(TIOT_KP, 0.0f, TIOT_KD);
@@ -1735,16 +1601,6 @@ void Process_Buttons(void) {
     // 3. SELECT / OK BUTTON (PB15)
     // ---------------------------------------------------------
     if (select_event) {
-        if (Current_UI_State == UI_STATE_MAIN) {
-            if (System_Run_State == SYS_RUNNING) {
-                Pause_Profile();
-            } else if (System_Run_State == SYS_PAUSED) {
-                (void)Resume_Profile();
-            }
-            LCD_Needs_Update = true;
-            return;
-        }
-
         switch (Current_UI_State) {
             case UI_STATE_SET_INTERVAL:
                 Sanitize_Settings();
@@ -1867,8 +1723,6 @@ void Update_LCD(void) {
                 if (System_Run_State == SYS_IDLE) {
                     snprintf(temp_buf, sizeof(temp_buf), "Temp:%4d" "\xDF" "C P0/%u",
                              display_temp, (unsigned int)Total_Intervals);
-                } else if (System_Run_State == SYS_PAUSED) {
-                    snprintf(temp_buf, sizeof(temp_buf), "T:%4d" "\xDF" "C PAUSE", display_temp);
                 } else if (System_Run_State == SYS_COMPLETED) {
                     snprintf(temp_buf, sizeof(temp_buf), "Temp:%4d" "\xDF" "C DONE", display_temp);
                 } else {

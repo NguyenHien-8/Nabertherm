@@ -1,0 +1,177 @@
+--- main(9).c
++++ Core/Src/main.c
+@@ -241,6 +241,18 @@
+ #define TIOT_CAP_ERROR_0P7C_MS             260.0f
+ #define TIOT_CAP_ERROR_NEAR_MS             120.0f
+ 
++/* Independent Watchdog (IWDG) runtime safety.
++ * Direct register programming is used so this source remains drop-in compatible
++ * even if HAL_IWDG_MODULE_ENABLED was not previously enabled in stm32f1xx_hal_conf.h.
++ * With nominal 40 kHz LSI, /64 and reload 2499 give about 4 s.
++ */
++#define IWDG_KR_START_KEY                  0xCCCCU
++#define IWDG_KR_WRITE_ACCESS_KEY           0x5555U
++#define IWDG_KR_REFRESH_KEY                0xAAAAU
++#define IWDG_PR_DIV64_VALUE                0x04U
++#define IWDG_RELOAD_VALUE                  2499U
++#define IWDG_CONFIG_TIMEOUT_MS              100U
++
+ // Flash Storage Architecture
+ // STM32F103C8T6 has 64KB Flash. Page 63 is the very last page (1KB size).
+ // Using the last page ensures we do not accidentally overwrite application code.
+@@ -260,6 +272,7 @@
+ SPI_HandleTypeDef hspi1;
+ 
+ TIM_HandleTypeDef htim2;
++
+ 
+ /* USER CODE BEGIN PV */
+ MAX31856_HandleTypeDef max31856;
+@@ -391,6 +404,7 @@
+ static void MX_TIM2_Init(void);
+ static void MX_I2C2_Init(void);
+ static void MX_SPI1_Init(void);
++static void MX_IWDG_Init(void);
+ /* USER CODE BEGIN PFP */
+ void Update_LCD(void);
+ void Process_Buttons(void);
+@@ -1323,7 +1337,19 @@
+         return;
+     }
+ 
++    /* Start each sensor sample with a fresh communication-health latch.
++     * Any SPI timeout/error in this sample forces heater OFF immediately.
++     */
++    MAX31856_ClearCommunicationError(&max31856);
++
+     max31856_fault_bits = MAX31856_ReadFault(&max31856);
++    if (MAX31856_HasCommunicationError(&max31856)) {
++        invalid_temp_count = 0U;
++        valid_recovery_count = 0U;
++        Trip_Control_Fault(CONTROL_FAULT_MAX31856);
++        return;
++    }
++
+     if (max31856_fault_bits != 0U) {
+         invalid_temp_count = 0U;
+         valid_recovery_count = 0U;
+@@ -1332,6 +1358,13 @@
+     }
+ 
+     const float measured = MAX31856_ReadThermocoupleTemperature(&max31856);
++    if (MAX31856_HasCommunicationError(&max31856)) {
++        invalid_temp_count = 0U;
++        valid_recovery_count = 0U;
++        Trip_Control_Fault(CONTROL_FAULT_MAX31856);
++        return;
++    }
++
+     const bool valid = isfinite(measured) &&
+                        measured >= SENSOR_MIN_VALID_C &&
+                        measured <= SENSOR_MAX_VALID_C;
+@@ -1924,13 +1957,24 @@
+   //====== Init MAX31856 ======//
+     max31856_ready = MAX31856_Init(&max31856, &hspi1, GPIOB, GPIO_PIN_6);
+     if (max31856_ready) {
++        /* Configuration writes are also checked. A sensor that responds during
++         * MAX31856_Init() but fails during Type-S / 50 Hz / continuous-mode
++         * configuration is not accepted as ready.
++         */
++        MAX31856_ClearCommunicationError(&max31856);
+         MAX31856_SetThermocoupleType(&max31856, MAX31856_TCTYPE_S);
+         MAX31856_SetNoiseFilter(&max31856, MAX31856_NOISE_FILTER_50HZ);
+         MAX31856_SetConversionMode(&max31856, MAX31856_CONTINUOUS);
+-        last_temp_read_time = HAL_GetTick();
+-        sensor_has_valid_sample = false;
++
++        if (MAX31856_HasCommunicationError(&max31856)) {
++            max31856_ready = false;
++            Control_Fault = CONTROL_FAULT_MAX31856;
++        } else {
++            last_temp_read_time = HAL_GetTick();
++            sensor_has_valid_sample = false;
++        }
+     } else {
+-        Control_Fault = CONTROL_FAULT_SENSOR_DATA;
++        Control_Fault = CONTROL_FAULT_MAX31856;
+     }
+ 
+   //====== Init PID ======//
+@@ -1941,6 +1985,12 @@
+     PID_SetSampleTime(&pid_heater, WINDOW_SIZE);
+     windowStartTime = HAL_GetTick();
+ 
++  //====== Init Independent Watchdog ======//
++    /* Start IWDG only after GPIO, sensor interface and PID are initialized.
++     * After this point the watchdog cannot be stopped by software.
++     */
++    MX_IWDG_Init();
++
+   /* USER CODE END 2 */
+ 
+   /* Infinite loop */
+@@ -1956,6 +2006,12 @@
+       Advance_Profile_If_Needed(current_run_seconds);
+       Update_PID_And_SSR(now_ms, current_run_seconds);
+       Update_LCD();
++
++      /* Refresh only after ALL foreground tasks returned successfully.
++       * If SPI/control/LCD code blocks indefinitely, this line is not reached
++       * and IWDG resets the MCU; startup code then configures PB7 LOW again.
++       */
++      IWDG->KR = IWDG_KR_REFRESH_KEY;
+     /* USER CODE END WHILE */
+ 
+     /* USER CODE BEGIN 3 */
+@@ -2000,6 +2056,32 @@
+   {
+     Error_Handler();
+   }
++}
++
++/**
++  * @brief IWDG Initialization Function
++  * @note  Direct STM32F1 register sequence; no HAL IWDG module dependency.
++  */
++static void MX_IWDG_Init(void)
++{
++  /* Start first, then unlock PR/RLR as required by STM32F1 IWDG sequence. */
++  IWDG->KR = IWDG_KR_START_KEY;
++  IWDG->KR = IWDG_KR_WRITE_ACCESS_KEY;
++  IWDG->PR = IWDG_PR_DIV64_VALUE;
++  IWDG->RLR = IWDG_RELOAD_VALUE;
++
++  /* PR/RLR updates cross from APB domain to the LSI domain. Do not wait forever
++   * if the peripheral/clock is abnormal; Error_Handler leaves the started IWDG
++   * unrefreshed so hardware can recover by reset.
++   */
++  const uint32_t start_ms = HAL_GetTick();
++  while (IWDG->SR != 0U) {
++      if ((uint32_t)(HAL_GetTick() - start_ms) > IWDG_CONFIG_TIMEOUT_MS) {
++          Error_Handler();
++      }
++  }
++
++  IWDG->KR = IWDG_KR_REFRESH_KEY;
+ }
+ 
+ /**
+@@ -2184,10 +2266,17 @@
+ void Error_Handler(void)
+ {
+   /* USER CODE BEGIN Error_Handler_Debug */
+-  /* User can add his own implementation to report the HAL error return state */
++  /* Fail-safe first: force the heater command OFF before stopping execution.
++   * Enabling GPIOB clock here also covers errors that occur before MX_GPIO_Init().
++   * If IWDG has already started, do not refresh it; the MCU will reset.
++   */
++  __HAL_RCC_GPIOB_CLK_ENABLE();
++  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
++
+   __disable_irq();
+   while (1)
+   {
++    /* Intentionally empty. IWDG, when active, performs recovery reset. */
+   }
+   /* USER CODE END Error_Handler_Debug */
+ }

@@ -1,0 +1,637 @@
+# YÊU CẦU PHÂN TÍCH VÀ LẬP TÀI LIỆU THUẬT TOÁN SOURCE CODE STM32CUBEIDE
+
+## 1. Vai trò
+
+Hãy đóng vai một **kỹ sư lập trình hệ thống nhúng chuyên nghiệp**, có kinh nghiệm về:
+
+* Vi điều khiển STM32.
+* STM32CubeIDE và STM32CubeMX.
+* Ngôn ngữ C/C++ nhúng.
+* STM32 HAL/LL Driver.
+* Ngắt, Timer, PWM, ADC, DMA, UART, SPI, I2C, CAN.
+* Điều khiển PID, cảm biến, relay, SSR, LCD và các hệ thống điều khiển nhiệt độ.
+* Phân tích chương trình theo máy trạng thái hữu hạn (Finite State Machine).
+
+## 2. Mục tiêu
+
+Hãy đọc và phân tích **toàn bộ source code STM32CubeIDE tôi cung cấp**, sau đó tạo một file Markdown tên:
+
+`PHAN_TICH_THUAT_TOAN_SOURCE_CODE.md`
+
+File Markdown phải trình bày đầy đủ để một kỹ sư hoặc một AI khác, dù chưa từng xem dự án, vẫn có thể:
+
+1. Hiểu mục đích tổng thể của hệ thống.
+2. Hiểu cấu trúc phần cứng và phần mềm.
+3. Hiểu trình tự hoạt động từ lúc cấp nguồn.
+4. Hiểu đầy đủ thuật toán của từng chế độ vận hành.
+5. Biết dữ liệu đi từ đâu, được xử lý thế nào và điều khiển thiết bị nào.
+6. Hiểu quan hệ giữa các file, hàm, biến và module.
+7. Có thể tiếp tục sửa lỗi, bảo trì hoặc phát triển source code.
+
+## 3. Nguyên tắc bắt buộc khi phân tích
+
+* Phải đọc tất cả các file được cung cấp trước khi kết luận.
+
+* Không chỉ mô tả tên hàm; phải giải thích **hàm làm gì, được gọi khi nào, nhận dữ liệu nào, thay đổi biến nào và ảnh hưởng đến phần cứng nào**.
+
+* Không được tự suy đoán chức năng nếu source code không thể hiện rõ.
+
+* Nội dung không xác định phải đánh dấu:
+
+  `CHƯA XÁC ĐỊNH – cần bổ sung file hoặc thông tin phần cứng.`
+
+* Phân biệt rõ:
+
+  * Thông tin xác nhận trực tiếp từ source code.
+  * Nhận định được suy luận từ source code.
+  * Nội dung còn thiếu hoặc chưa thể xác minh.
+
+* Giữ nguyên chính xác tên file, hàm, biến, macro, enum, struct, chân GPIO và hằng số.
+
+* Mỗi nhận định quan trọng phải chỉ ra vị trí liên quan, ví dụ:
+
+  `main.c → main() → vòng lặp while(1)`
+
+* Không bỏ qua những đoạn code nằm trong:
+
+  * Hàm callback.
+  * Hàm ngắt.
+  * Timer.
+  * DMA.
+  * Các file `.c` và `.h` do người dùng tự viết.
+  * Các vùng `USER CODE BEGIN/END`.
+  * Các biến global, static, volatile.
+  * Các macro và cấu hình tiền xử lý.
+
+## 4. Cấu trúc bắt buộc của file Markdown
+
+# PHÂN TÍCH THUẬT TOÁN SOURCE CODE STM32CUBEIDE
+
+## 1. Thông tin tổng quan
+
+Trình bày:
+
+* Tên hoặc mục đích của dự án.
+* Dòng vi điều khiển STM32 đang sử dụng.
+* Chức năng chính của hệ thống.
+* Đầu vào của hệ thống.
+* Đầu ra của hệ thống.
+* Các thiết bị ngoại vi được điều khiển.
+* Các giao thức truyền thông được sử dụng.
+* Các chế độ vận hành có trong chương trình.
+
+Tóm tắt nguyên lý hệ thống trong khoảng 5–10 câu.
+
+## 2. Danh sách và vai trò của các file
+
+Lập bảng:
+
+| STT | Tên file | Loại file | Chức năng | Quan hệ với file khác |
+| --: | -------- | --------- | --------- | --------------------- |
+
+Phân loại rõ:
+
+* File chương trình chính.
+* File driver.
+* File thư viện.
+* File thuật toán điều khiển.
+* File cấu hình ngoại vi.
+* File giao diện hiển thị.
+* File xử lý cảm biến.
+* File xử lý lỗi hoặc an toàn.
+
+## 3. Cấu hình phần cứng
+
+Lập bảng:
+
+| Thành phần | Ngoại vi STM32 | Chân/kênh | Chế độ | Chức năng |
+| ---------- | -------------- | --------- | ------ | --------- |
+
+Phân tích các thành phần nếu có:
+
+* GPIO.
+* ADC.
+* Timer.
+* PWM.
+* DMA.
+* UART.
+* SPI.
+* I2C.
+* CAN.
+* RTC.
+* Watchdog.
+* Nút nhấn.
+* LCD.
+* Cảm biến.
+* Relay hoặc SSR.
+* Buzzer, LED hoặc thiết bị cảnh báo.
+
+Nếu không đủ thông tin để xác định chân kết nối, phải ghi rõ là chưa xác định.
+
+## 4. Các thư viện và module phần mềm
+
+Với từng module, trình bày:
+
+### 4.x. Tên module
+
+* File liên quan.
+* Mục đích.
+* Dữ liệu đầu vào.
+* Dữ liệu đầu ra.
+* Các biến quan trọng.
+* Các hàm chính.
+* Module nào gọi module này.
+* Module này gọi đến module nào.
+* Phần cứng liên quan.
+* Điều kiện lỗi và cách xử lý lỗi.
+
+## 5. Các kiểu dữ liệu, cấu trúc và biến quan trọng
+
+### 5.1. Macro và hằng số
+
+| Tên | Giá trị | File khai báo | Ý nghĩa | Nơi sử dụng |
+| --- | ------: | ------------- | ------- | ----------- |
+
+### 5.2. Enum và trạng thái
+
+| Tên enum/trạng thái | Ý nghĩa | Điều kiện đi vào | Điều kiện thoát |
+| ------------------- | ------- | ---------------- | --------------- |
+
+### 5.3. Struct
+
+Phân tích từng trường dữ liệu:
+
+| Tên struct | Trường | Kiểu dữ liệu | Ý nghĩa | Nơi sử dụng |
+| ---------- | ------ | ------------ | ------- | ----------- |
+
+### 5.4. Biến toàn cục và biến static
+
+| Tên biến | Kiểu | Giá trị ban đầu | File | Hàm đọc | Hàm thay đổi | Ý nghĩa |
+| -------- | ---- | --------------- | ---- | ------- | ------------ | ------- |
+
+Đặc biệt chỉ ra:
+
+* Biến được thay đổi trong ngắt.
+* Biến cần khai báo `volatile`.
+* Biến trạng thái.
+* Biến đếm thời gian.
+* Biến cờ.
+* Biến lưu giá trị cảm biến.
+* Biến điều khiển ngõ ra.
+* Biến tham số PID.
+* Biến lưu lỗi.
+
+## 6. Trình tự khởi động hệ thống
+
+Phân tích từ khi vi điều khiển được cấp nguồn hoặc reset:
+
+1. `HAL_Init()`.
+2. Cấu hình clock.
+3. Khởi tạo GPIO.
+4. Khởi tạo các ngoại vi.
+5. Khởi tạo module tự viết.
+6. Giá trị ban đầu của biến.
+7. Trạng thái mặc định.
+8. Thiết bị đầu ra được bật/tắt như thế nào.
+9. Thời điểm chương trình đi vào `while(1)`.
+
+Sử dụng sơ đồ Mermaid:
+
+```mermaid
+flowchart TD
+    A[Khởi động hoặc Reset] --> B[Khởi tạo HAL]
+    B --> C[Cấu hình Clock]
+    C --> D[Khởi tạo ngoại vi]
+    D --> E[Khởi tạo module]
+    E --> F[Thiết lập trạng thái ban đầu]
+    F --> G[Vòng lặp chính]
+```
+
+Điều chỉnh sơ đồ để phản ánh đúng source code thực tế.
+
+## 7. Phân tích vòng lặp chính
+
+Phân tích chi tiết từng tác vụ trong `while(1)`:
+
+* Thứ tự thực hiện.
+* Điều kiện gọi từng hàm.
+* Chu kỳ cập nhật.
+* Cách tạo mốc thời gian bằng `HAL_GetTick()`, Timer hoặc biến đếm.
+* Tác vụ chạy liên tục.
+* Tác vụ chạy theo chu kỳ.
+* Tác vụ phụ thuộc trạng thái.
+* Tác vụ có thể làm chương trình bị chặn.
+* Quan hệ giữa vòng lặp chính và ngắt.
+
+Viết lại vòng lặp chính bằng pseudocode dễ hiểu.
+
+## 8. Phân tích đầy đủ từng chế độ vận hành
+
+Tạo một mục riêng cho từng chế độ, ví dụ:
+
+* Chế độ AUTO.
+* Chế độ MANUAL.
+* Chế độ TIOT.
+* Chế độ MT.
+* Chế độ cài đặt.
+* Chế độ hiệu chỉnh.
+* Chế độ cảnh báo.
+* Chế độ dừng khẩn cấp.
+
+Với mỗi chế độ, phải trình bày:
+
+### 8.x. Tên chế độ
+
+#### Mục đích
+
+Giải thích chế độ dùng để làm gì.
+
+#### Điều kiện đi vào chế độ
+
+* Nút nhấn hoặc lệnh nào kích hoạt.
+* Trạng thái trước đó.
+* Các điều kiện an toàn.
+* Các biến hoặc cờ liên quan.
+
+#### Dữ liệu đầu vào
+
+* Giá trị cảm biến.
+* Giá trị cài đặt.
+* Thời gian.
+* Trạng thái nút nhấn.
+* Lệnh truyền thông.
+
+#### Trình tự xử lý
+
+Mô tả tuần tự từng bước, không mô tả chung chung.
+
+#### Thuật toán điều khiển
+
+Nêu rõ:
+
+* Công thức tính toán.
+* Điều kiện `if/else`.
+* Các ngưỡng.
+* Bộ đếm thời gian.
+* Điều kiện bật/tắt đầu ra.
+* Giới hạn giá trị.
+* Cách chuyển trạng thái.
+
+#### Dữ liệu đầu ra
+
+* Relay hoặc SSR.
+* PWM.
+* LCD.
+* LED.
+* Buzzer.
+* Dữ liệu truyền thông.
+
+#### Điều kiện kết thúc hoặc chuyển chế độ
+
+* Hoàn thành bình thường.
+* Người dùng hủy.
+* Quá thời gian.
+* Cảm biến lỗi.
+* Quá nhiệt.
+* Điều kiện an toàn khác.
+
+#### Pseudocode
+
+Viết pseudocode bám sát source code.
+
+#### Sơ đồ thuật toán
+
+Tạo sơ đồ Mermaid mô tả riêng cho chế độ.
+
+#### Ví dụ mô phỏng
+
+Đưa ra một ví dụ với dữ liệu giả định để minh họa đường đi của thuật toán. Phải ghi rõ đây là ví dụ minh họa, không phải thông số lấy từ source code.
+
+## 9. Máy trạng thái của chương trình
+
+Nếu chương trình sử dụng biến trạng thái, `enum`, `switch-case` hoặc các cờ chế độ, hãy dựng lại máy trạng thái.
+
+Lập bảng:
+
+| Trạng thái hiện tại | Điều kiện/sự kiện | Trạng thái tiếp theo | Hành động |
+| ------------------- | ----------------- | -------------------- | --------- |
+
+Tạo sơ đồ Mermaid:
+
+```mermaid
+stateDiagram-v2
+    [*] --> KhoiTao
+    KhoiTao --> ChoLenh
+    ChoLenh --> VanHanh
+    VanHanh --> HoanThanh
+    VanHanh --> BaoLoi
+    HoanThanh --> ChoLenh
+    BaoLoi --> ChoLenh
+```
+
+Phải thay thế các trạng thái ví dụ bằng trạng thái thực tế trong source code.
+
+## 10. Thuật toán đọc và xử lý cảm biến
+
+Phân tích:
+
+* Cảm biến được đọc bằng giao tiếp nào.
+* Hàm bắt đầu quá trình đọc.
+* Hàm nhận dữ liệu.
+* Cách chuyển đổi dữ liệu thô.
+* Công thức tính giá trị vật lý.
+* Đơn vị đo.
+* Tần suất lấy mẫu.
+* Bộ lọc dữ liệu nếu có.
+* Kiểm tra giới hạn.
+* Phát hiện mất kết nối.
+* Phát hiện dữ liệu không hợp lệ.
+* Giá trị được sử dụng ở đâu sau khi đọc.
+
+Nếu sử dụng MAX31856, thermocouple hoặc cảm biến nhiệt độ, cần phân tích cả thanh ghi, loại thermocouple, phát hiện lỗi và cách đổi dữ liệu sang độ C.
+
+## 11. Thuật toán điều khiển PID
+
+Nếu source code có PID, hãy trình bày:
+
+* Biến đặt `setpoint`.
+* Giá trị phản hồi.
+* Sai số.
+* Hệ số `Kp`, `Ki`, `Kd`.
+* Chu kỳ lấy mẫu.
+* Thành phần P, I và D.
+* Giới hạn đầu ra.
+* Chống bão hòa tích phân.
+* Chế độ Auto/Manual.
+* Điều kiện reset PID.
+* Cách đầu ra PID được chuyển thành PWM hoặc thời gian đóng SSR.
+* Tác động khi nhiệt độ vượt giá trị đặt.
+* Các rủi ro trong cách triển khai hiện tại.
+
+Viết công thức PID đúng với source code, không dùng công thức chung nếu chương trình triển khai khác.
+
+## 12. Thuật toán điều khiển relay, SSR hoặc PWM
+
+Phân tích:
+
+* Chân điều khiển.
+* Mức logic bật và tắt.
+* Điều khiển liên tục hay theo cửa sổ thời gian.
+* Chu kỳ đóng cắt.
+* Giá trị đầu vào quyết định tỷ lệ bật.
+* Điều kiện cưỡng bức tắt.
+* Trạng thái khi khởi động.
+* Trạng thái khi cảm biến lỗi.
+* Trạng thái khi quá nhiệt.
+* Khả năng đóng cắt quá nhanh hoặc gây mất an toàn.
+
+## 13. Thuật toán xử lý nút nhấn và giao diện
+
+Phân tích:
+
+* Cách đọc nút.
+* Chống dội phím.
+* Nhấn ngắn.
+* Nhấn giữ.
+* Nhấn đồng thời.
+* Thay đổi màn hình.
+* Thay đổi chế độ.
+* Thay đổi thông số.
+* Lưu hoặc hủy cài đặt.
+* Giới hạn giá trị cài đặt.
+
+Lập bảng:
+
+| Nút/thao tác | Trạng thái hiện tại | Hành động | Biến bị thay đổi | Màn hình hiển thị |
+| ------------ | ------------------- | --------- | ---------------- | ----------------- |
+
+## 14. Thuật toán hiển thị LCD
+
+Phân tích:
+
+* Loại LCD và giao tiếp.
+* Hàm khởi tạo.
+* Các màn hình hiển thị.
+* Điều kiện chuyển màn hình.
+* Nội dung từng dòng.
+* Dữ liệu được cập nhật.
+* Chu kỳ làm mới.
+* Cách hạn chế nhấp nháy.
+* Các thông báo lỗi và cảnh báo.
+
+## 15. Ngắt, callback, Timer và DMA
+
+Lập bảng:
+
+| Hàm ngắt/callback | Nguồn kích hoạt | Tần suất | Biến bị thay đổi | Ảnh hưởng đến chương trình |
+| ----------------- | --------------- | -------: | ---------------- | -------------------------- |
+
+Giải thích:
+
+* Luồng thực thi giữa chương trình chính và ngắt.
+* Các biến dùng chung.
+* Nguy cơ race condition.
+* Đoạn xử lý quá dài trong ngắt.
+* Những hàm không nên gọi trong ngắt.
+* Cách các cờ ngắt được xử lý trong `while(1)`.
+
+## 16. Cơ chế xử lý lỗi và an toàn
+
+Liệt kê toàn bộ trường hợp lỗi:
+
+| Mã/tên lỗi | Điều kiện phát hiện | Phản ứng hệ thống | Cách khôi phục |
+| ---------- | ------------------- | ----------------- | -------------- |
+
+Kiểm tra các tình huống:
+
+* Cảm biến bị ngắt.
+* Cảm biến đọc sai.
+* Quá nhiệt.
+* Mất giao tiếp.
+* Treo chương trình.
+* Giá trị cài đặt vượt giới hạn.
+* Relay hoặc SSR bị điều khiển sai.
+* Mất điện và khởi động lại.
+* Watchdog.
+* Emergency stop.
+* Lỗi HAL.
+* `Error_Handler()`.
+
+Chỉ rõ đầu ra có được đưa về trạng thái an toàn khi xảy ra lỗi hay không.
+
+## 17. Lưu và khôi phục thông số
+
+Nếu sử dụng Flash, EEPROM hoặc bộ nhớ ngoài, phân tích:
+
+* Dữ liệu được lưu.
+* Địa chỉ lưu.
+* Cấu trúc dữ liệu.
+* Thời điểm ghi.
+* Thời điểm đọc.
+* Kiểm tra dữ liệu hợp lệ.
+* Giá trị mặc định.
+* Số lần ghi Flash.
+* Nguy cơ giảm tuổi thọ Flash.
+* Xử lý khi dữ liệu bị hỏng.
+
+## 18. Luồng dữ liệu tổng thể
+
+Lập bảng:
+
+| Nguồn dữ liệu | Hàm đọc | Biến lưu | Hàm xử lý | Biến kết quả | Thiết bị nhận |
+| ------------- | ------- | -------- | --------- | ------------ | ------------- |
+
+Tạo sơ đồ luồng dữ liệu từ:
+
+**Cảm biến/nút nhấn → xử lý → thuật toán điều khiển → thiết bị đầu ra/LCD**
+
+## 19. Danh mục hàm trong toàn bộ dự án
+
+Lập bảng đầy đủ:
+
+| Hàm | File | Tham số vào | Giá trị trả về | Chức năng | Hàm gọi nó | Hàm được nó gọi |
+| --- | ---- | ----------- | -------------- | --------- | ---------- | --------------- |
+
+Sau bảng, phân tích chi tiết các hàm quan trọng.
+
+## 20. Pseudocode tổng thể của chương trình
+
+Viết lại toàn bộ chương trình bằng pseudocode có cấu trúc, bao gồm:
+
+* Khởi tạo.
+* Vòng lặp chính.
+* Đọc cảm biến.
+* Xử lý nút.
+* Chọn chế độ.
+* Điều khiển PID.
+* Điều khiển đầu ra.
+* Hiển thị.
+* Phát hiện và xử lý lỗi.
+* Chuyển trạng thái.
+
+Pseudocode phải đủ rõ để một người khác có thể triển khai lại chương trình.
+
+## 21. Bảng truy vết yêu cầu – thuật toán – source code
+
+| Chức năng | Thuật toán | Hàm thực hiện | File | Biến liên quan | Phần cứng |
+| --------- | ---------- | ------------- | ---- | -------------- | --------- |
+
+Bảng này phải giúp người đọc tìm ngược từ chức năng đến đúng vị trí source code.
+
+## 22. Đánh giá chất lượng source code
+
+Đánh giá riêng từng vấn đề:
+
+* Tổ chức file.
+* Tính module hóa.
+* Tên biến và tên hàm.
+* Biến toàn cục.
+* Code lặp.
+* Hàm quá dài.
+* Xử lý thời gian.
+* Code blocking.
+* Xử lý ngắt.
+* An toàn dữ liệu.
+* Kiểm tra lỗi.
+* Khả năng mở rộng.
+* Khả năng bảo trì.
+* An toàn điều khiển phần cứng.
+
+Mỗi nhận xét phải có bằng chứng từ source code.
+
+## 23. Các lỗi hoặc rủi ro tiềm ẩn
+
+Lập bảng:
+
+| Mức độ | Vị trí | Vấn đề | Hậu quả | Hướng khắc phục |
+| ------ | ------ | ------ | ------- | --------------- |
+
+Phân loại mức độ:
+
+* Nghiêm trọng.
+* Cao.
+* Trung bình.
+* Thấp.
+
+Không khẳng định có lỗi nếu chưa đủ bằng chứng. Trong trường hợp đó, ghi rõ là “rủi ro cần kiểm tra”.
+
+## 24. Đề xuất cải tiến
+
+Đề xuất theo thứ tự ưu tiên:
+
+1. Cải tiến bắt buộc liên quan đến an toàn.
+2. Sửa lỗi logic.
+3. Cải thiện độ ổn định.
+4. Tối ưu hiệu suất.
+5. Tái cấu trúc source code.
+6. Cải thiện khả năng bảo trì.
+7. Bổ sung logging và chẩn đoán lỗi.
+
+Không sửa source code trong phần này, trừ khi tôi yêu cầu riêng.
+
+## 25. Những thông tin còn thiếu
+
+Liệt kê cụ thể:
+
+* File chưa được cung cấp.
+* Thư viện còn thiếu.
+* Sơ đồ nguyên lý cần bổ sung.
+* Cấu hình CubeMX cần bổ sung.
+* Thông số phần cứng chưa xác định.
+* Chế độ chưa thể phân tích.
+* Giá trị hoặc công thức chưa thể xác minh.
+
+## 26. Kết luận
+
+Tóm tắt:
+
+* Hệ thống làm gì.
+* Thuật toán điều khiển chính.
+* Cách các module phối hợp.
+* Trình tự vận hành tổng thể.
+* Các điểm an toàn quan trọng.
+* Những hạn chế hoặc rủi ro chính.
+* Mức độ đầy đủ của việc phân tích.
+
+## 5. Yêu cầu về cách trình bày
+
+* Xuất kết quả dưới dạng Markdown chuẩn.
+* Viết bằng tiếng Việt rõ ràng, chính xác và dễ hiểu.
+* Sử dụng tiêu đề `#`, `##`, `###`.
+* Dùng bảng Markdown khi cần đối chiếu.
+* Dùng khối mã cho pseudocode.
+* Dùng Mermaid cho sơ đồ luồng và máy trạng thái.
+* Không chép nguyên toàn bộ source code vào tài liệu.
+* Chỉ trích dẫn những đoạn code cần thiết để chứng minh thuật toán.
+* Đánh số hình, bảng và mục rõ ràng.
+* Không mô tả sơ sài hoặc chỉ liệt kê tên hàm.
+* Không bỏ qua các nhánh điều kiện hiếm gặp và trường hợp lỗi.
+
+## 6. Quy trình thực hiện
+
+Hãy thực hiện theo thứ tự:
+
+1. Kiểm kê tất cả file đã nhận.
+2. Xác định file hoặc thư viện còn thiếu.
+3. Đọc các file header để nhận diện API, kiểu dữ liệu và biến.
+4. Đọc các file source để xác định cách triển khai.
+5. Xác định hàm `main()`, vòng lặp chính, ngắt và callback.
+6. Dựng sơ đồ gọi hàm.
+7. Xác định các trạng thái và chế độ vận hành.
+8. Truy vết dữ liệu từ đầu vào đến đầu ra.
+9. Phân tích từng thuật toán.
+10. Kiểm tra chéo nội dung giữa các file.
+11. Soạn tài liệu Markdown hoàn chỉnh.
+12. Cuối cùng, tự kiểm tra xem tài liệu đã đủ để một AI khác hiểu và tiếp tục dự án hay chưa.
+
+## 7. Yêu cầu đầu ra cuối cùng
+
+Hãy trả về:
+
+1. File `PHAN_TICH_THUAT_TOAN_SOURCE_CODE.md` hoàn chỉnh.
+2. Danh sách file đã phân tích.
+3. Danh sách file còn thiếu.
+4. Mức độ chắc chắn của từng phần phân tích.
+5. Các câu hỏi cần tôi bổ sung để hoàn thiện tài liệu.
+
+Không bắt đầu phân tích cho đến khi đã kiểm kê toàn bộ file tôi gửi. Nếu một số file bị thiếu, vẫn phân tích phần có thể xác minh và đánh dấu rõ phần chưa đủ dữ liệu.
