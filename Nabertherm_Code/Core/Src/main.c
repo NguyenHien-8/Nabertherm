@@ -177,70 +177,44 @@ typedef struct {
 #define MT_MAX_OUTPUT_2_1_MS             280.0f
 #define MT_MAX_OUTPUT_NEAR_MS            220.0f
 
-/* MODE_TIOT fixed-deadline trajectory control.
- * Design goals:
- *  - The programmed duration is absolute: when time expires, the next segment starts.
- *  - Heating demand is calculated from temperature error / remaining time.
- *  - Furnace heating rate is learned online and used as feed-forward.
- *  - Coasting is allowed only when the measured trajectory is genuinely ahead of
- *    the deadline, avoiding the previous fixed 2.5-minute predictive cut-off.
+/* MODE_TIOT linear trajectory tracking.
+ *
+ * The commanded Setpoint is the exact time interpolation from start to target;
+ * it is never advanced above that line. Heater demand combines:
+ *   1. feed-forward for the programmed ramp rate,
+ *   2. signed pace correction (behind/ahead of the line), and
+ *   3. signed temperature-rate feedback.
+ *
+ * Example: 40 -> 140 degC in 20 min gives exactly 5 degC/min and a 90 degC
+ * reference at minute 10. The initial full-power estimate of 7 degC/min comes
+ * from the reported 40 -> 110 degC / 10 min observation and is learned online.
  */
-#define TIOT_TARGET_TOLERANCE_C             1.5f
-#define TIOT_HARD_CUTOFF_C                  0.25f
+#define TIOT_TARGET_TOLERANCE_C             0.25f
+#define TIOT_HARD_CUTOFF_C                  0.10f
 #define TIOT_KP                            35.0f
 #define TIOT_KI                             0.10f
 #define TIOT_KD                           250.0f
 #define TIOT_INTEGRAL_ENABLE_BAND_C        30.0f
-#define TIOT_PROFILE_LEAD_GAIN              1.20f
-#define TIOT_RATE_LEAD_TIME_MIN             1.20f
-#define TIOT_BASE_LEAD_TIME_MIN             1.00f
-#define TIOT_MAX_SETPOINT_LEAD_C           45.0f
-#define TIOT_INITIAL_FULL_POWER_RATE_C_MIN  5.0f
+
+#define TIOT_TRACK_CORRECTION_MAX_MIN        2.00f
+#define TIOT_TRACK_CORRECTION_MIN_MIN        0.25f
+#define TIOT_RATE_FEEDBACK_MS_PER_C_MIN      45.0f
+#define TIOT_TRAJECTORY_LOOKAHEAD_MIN         0.20f
+#define TIOT_TRAJECTORY_BRAKE_BAND_C          0.75f
+
+#define TIOT_INITIAL_FULL_POWER_RATE_C_MIN   7.0f
 #define TIOT_RATE_EST_ALPHA                 0.10f
 #define TIOT_RATE_EST_WARMUP_SEC           45U
 #define TIOT_RATE_EST_MIN_OUTPUT_MS       650.0f
 #define TIOT_RATE_EST_MIN_C_MIN             0.10f
 #define TIOT_RATE_EST_MIN_FULL_C_MIN        0.50f
 #define TIOT_RATE_EST_MAX_FULL_C_MIN       40.0f
-#define TIOT_RATE_EST_FREEZE_BAND_C        25.0f
-#define TIOT_RATE_FF_SAFETY_FACTOR          1.03f
-#define TIOT_PACE_BOOST_MS_PER_C           25.0f
-#define TIOT_RATE_BOOST_MS_PER_C_MIN       45.0f
-
-/* TIOT endpoint deadline-capture controller.
- *
- * V1 used the slow 5 s temperature-rate estimate as if that rate would remain
- * available after SSR turn-off. On the tested furnace this over-predicted coast
- * energy and caused a 5..6 degC undershoot at the fixed deadline.
- *
- * V2 uses a dedicated fast rate estimate and a decaying passive-coast model.
- * TIOT_BRAKE_TIME_MIN is therefore an effective coast time constant, not a
- * constant-rate look-ahead. 0.35 min is the initial estimate from the latest
- * test where the 0.70 min model predicted roughly twice the useful coast rise.
- */
-#define TIOT_BRAKE_TIME_MIN                 0.60f
-#define TIOT_ENDPOINT_MARGIN_C              1.5f
-#define TIOT_BRAKE_CAP_HEADROOM_MS         70.0f
+#define TIOT_RATE_EST_FREEZE_BAND_C         3.0f
 #define TIOT_MIN_USEFUL_PULSE_MS            40.0f
 
 #define TIOT_FAST_RATE_UPDATE_MS          1500U
 #define TIOT_FAST_RATE_ALPHA                0.60f
 #define TIOT_FAST_RATE_MAX_ABS_C_MIN       80.0f
-
-#define TIOT_CAPTURE_WINDOW_SEC             90U
-#define TIOT_CAPTURE_BAND_C                 18.0f
-#define TIOT_RECOVERY_TRIGGER_C              1.50f
-#define TIOT_RECOVERY_SAFETY_FACTOR          1.05f
-
-/* Endpoint duty ceilings. Recovery can close a deadline deficit, but these caps
- * prevent a return to the old last-second full-power behavior near target.
- */
-#define TIOT_CAP_ERROR_8C_MS              1000.0f
-#define TIOT_CAP_ERROR_5C_MS               900.0f
-#define TIOT_CAP_ERROR_3C_MS               700.0f
-#define TIOT_CAP_ERROR_1P5C_MS             450.0f
-#define TIOT_CAP_ERROR_0P7C_MS             260.0f
-#define TIOT_CAP_ERROR_NEAR_MS             120.0f
 
 /* Independent Watchdog (IWDG) runtime safety.
  * Direct register programming is used so this source remains drop-in compatible
@@ -387,16 +361,17 @@ uint8_t last_control_mode = 0xFFU;
 float paused_pid_output_sum = 0.0f;
 float paused_active_output_ms = 0.0f;
 
-/* MODE_TIOT deadline tracking diagnostics and adaptive furnace-rate estimate. */
+/* MODE_TIOT linear-ramp diagnostics and adaptive furnace-rate estimate. */
 float tiot_ideal_temp_c = 0.0f;
 float tiot_command_setpoint_c = 0.0f;
+float tiot_planned_rate_c_per_min = 0.0f;
 float tiot_required_rate_c_per_min = 0.0f;
 float tiot_full_power_rate_est_c_per_min = TIOT_INITIAL_FULL_POWER_RATE_C_MIN;
 float tiot_output_floor_ms = 0.0f;
 float tiot_predicted_temp_c = 0.0f;
 
-/* Fast endpoint-only rate estimator. Keep the original slow estimator unchanged
- * because MODE_MT and full-power-rate learning already depend on it.
+/* Fast trajectory rate estimator. Keep the original slow estimator unchanged
+ * because MODE_MT and full-power-rate learning also depend on it.
  */
 float tiot_fast_rate_c_per_min = 0.0f;
 float tiot_fast_rate_last_temp = 0.0f;
@@ -549,6 +524,7 @@ static void Stop_Heating_Control(void) {
 
     tiot_ideal_temp_c = Input;
     tiot_command_setpoint_c = Input;
+    tiot_planned_rate_c_per_min = 0.0f;
     tiot_required_rate_c_per_min = 0.0f;
     tiot_output_floor_ms = 0.0f;
     tiot_predicted_temp_c = Input;
@@ -659,6 +635,7 @@ static bool Start_Profile(void) {
     tiot_full_power_rate_est_c_per_min = TIOT_INITIAL_FULL_POWER_RATE_C_MIN;
     tiot_ideal_temp_c = Input;
     tiot_command_setpoint_c = Input;
+    tiot_planned_rate_c_per_min = 0.0f;
     tiot_required_rate_c_per_min = 0.0f;
     tiot_output_floor_ms = 0.0f;
     tiot_predicted_temp_c = Input;
@@ -741,6 +718,7 @@ static float Calculate_TIOT_Control_Setpoint(uint32_t current_run_seconds,
     const uint32_t duration_sec = Interval_Duration_Seconds(index);
 
     tiot_ideal_temp_c = profile_setpoint;
+    tiot_planned_rate_c_per_min = 0.0f;
     tiot_required_rate_c_per_min = 0.0f;
 
     if (duration_sec == 0U ||
@@ -753,16 +731,27 @@ static float Calculate_TIOT_Control_Setpoint(uint32_t current_run_seconds,
         (Target_Run_Seconds > current_run_seconds)
             ? (Target_Run_Seconds - current_run_seconds)
             : 0U;
-    const float remaining_error = target_temp - Input;
-    const float planned_rate_c_per_min =
+    tiot_planned_rate_c_per_min =
         ((target_temp - Current_Interval_Start_Temp) * 60.0f) /
         (float)duration_sec;
 
-    /* Average heating rate required from NOW to the fixed deadline. */
-    if (remaining_sec > 0U && remaining_error > 0.0f) {
-        const float remaining_min = (float)remaining_sec / 60.0f;
-        tiot_required_rate_c_per_min = remaining_error / remaining_min;
+    /* Correct deviations back to the programmed line over a bounded horizon.
+     * This is deliberately based on profile_setpoint - Input, not on the final
+     * target divided by remaining time. Therefore the controller cannot ignore
+     * the intermediate linear trajectory and race toward the endpoint early.
+     */
+    float correction_time_min = (float)remaining_sec / 60.0f;
+    if (correction_time_min > TIOT_TRACK_CORRECTION_MAX_MIN) {
+        correction_time_min = TIOT_TRACK_CORRECTION_MAX_MIN;
     }
+    if (correction_time_min < TIOT_TRACK_CORRECTION_MIN_MIN) {
+        correction_time_min = TIOT_TRACK_CORRECTION_MIN_MIN;
+    }
+
+    const float pace_error = profile_setpoint - Input;
+    tiot_required_rate_c_per_min =
+        tiot_planned_rate_c_per_min +
+        (pace_error / correction_time_min);
 
     if (tiot_required_rate_c_per_min > TIOT_RATE_EST_MAX_FULL_C_MIN) {
         tiot_required_rate_c_per_min = TIOT_RATE_EST_MAX_FULL_C_MIN;
@@ -771,30 +760,8 @@ static float Calculate_TIOT_Control_Setpoint(uint32_t current_run_seconds,
         tiot_required_rate_c_per_min = 0.0f;
     }
 
-    const float pace_error = profile_setpoint - Input;
-    const float positive_rate =
-        (temp_rate_c_per_min > 0.0f) ? temp_rate_c_per_min : 0.0f;
-    const float rate_deficit =
-        tiot_required_rate_c_per_min - positive_rate;
-
-    /* Lead the linear profile to compensate thermal lag, but never request above
-     * the final programmed target.
-     */
-    float lead_c = planned_rate_c_per_min * TIOT_BASE_LEAD_TIME_MIN;
-    if (pace_error > 0.0f) {
-        lead_c += pace_error * TIOT_PROFILE_LEAD_GAIN;
-    }
-    if (rate_deficit > 0.0f) {
-        lead_c += rate_deficit * TIOT_RATE_LEAD_TIME_MIN;
-    }
-
-    if (lead_c < 0.0f) lead_c = 0.0f;
-    if (lead_c > TIOT_MAX_SETPOINT_LEAD_C) {
-        lead_c = TIOT_MAX_SETPOINT_LEAD_C;
-    }
-
-    float command_setpoint = profile_setpoint + lead_c;
-    if (remaining_sec == 0U) command_setpoint = target_temp;
+    /* The PID Setpoint is exactly the ideal ramp. No positive lead is allowed. */
+    float command_setpoint = profile_setpoint;
     if (command_setpoint > target_temp) command_setpoint = target_temp;
     if (command_setpoint < 0.0f) command_setpoint = 0.0f;
     if (command_setpoint > (float)PROCESS_MAX_TEMP_C) {
@@ -897,12 +864,13 @@ static float Limit_TIOT_Output(float requested_output,
 
     const float target_error = target_temp - safety_temp;
     const float pace_error = tiot_ideal_temp_c - Input;
+    float measured_rate = temp_rate_c_per_min;
+    if (!isfinite(measured_rate)) measured_rate = 0.0f;
+
     const float slow_positive_rate =
-        (temp_rate_c_per_min > 0.0f) ? temp_rate_c_per_min : 0.0f;
+        (measured_rate > 0.0f) ? measured_rate : 0.0f;
     const float fast_positive_rate =
         (tiot_fast_rate_c_per_min > 0.0f) ? tiot_fast_rate_c_per_min : 0.0f;
-    const float rate_deficit =
-        tiot_required_rate_c_per_min - slow_positive_rate;
 
     if (duration_sec == 0U || target_temp <= Current_Interval_Start_Temp) {
         if (safety_temp >= target_temp) {
@@ -914,7 +882,9 @@ static float Limit_TIOT_Output(float requested_output,
         return requested_output;
     }
 
-    /* Never add heat at/above target. */
+    /* Never add heat at/above the final target. The hotter raw/filtered sample
+     * wins, so sensor-filter lag cannot issue one extra SSR pulse.
+     */
     if (target_error <= 0.0f ||
         safety_temp >= (target_temp + TIOT_HARD_CUTOFF_C)) {
         Output = 0.0f;
@@ -925,170 +895,83 @@ static float Limit_TIOT_Output(float requested_output,
     }
 
     float rate_est = tiot_full_power_rate_est_c_per_min;
+    if (!isfinite(rate_est)) {
+        rate_est = TIOT_INITIAL_FULL_POWER_RATE_C_MIN;
+    }
     if (rate_est < TIOT_RATE_EST_MIN_FULL_C_MIN) {
         rate_est = TIOT_RATE_EST_MIN_FULL_C_MIN;
+    } else if (rate_est > TIOT_RATE_EST_MAX_FULL_C_MIN) {
+        rate_est = TIOT_RATE_EST_MAX_FULL_C_MIN;
     }
 
-    /* Bulk-ramp deadline feed-forward. */
+    /* Feed-forward follows the rate required to return to the programmed line,
+     * not the rate required to race directly to the final target.
+     */
     float rate_feedforward_ms =
         (tiot_required_rate_c_per_min / rate_est) *
-        (float)WINDOW_SIZE * TIOT_RATE_FF_SAFETY_FACTOR;
+        (float)WINDOW_SIZE;
 
     if (rate_feedforward_ms < 0.0f) rate_feedforward_ms = 0.0f;
     if (rate_feedforward_ms > (float)WINDOW_SIZE) {
         rate_feedforward_ms = (float)WINDOW_SIZE;
     }
 
-    float corrective_demand_ms = 0.0f;
-    if (pace_error > 0.0f) {
-        corrective_demand_ms += pace_error * TIOT_PACE_BOOST_MS_PER_C;
-    }
-    if (rate_deficit > 0.0f) {
-        corrective_demand_ms +=
-            rate_deficit * TIOT_RATE_BOOST_MS_PER_C_MIN;
-    }
-
-    tiot_output_floor_ms =
-        (rate_feedforward_ms > corrective_demand_ms)
-            ? rate_feedforward_ms
-            : corrective_demand_ms;
-
-    if (tiot_output_floor_ms < 0.0f) tiot_output_floor_ms = 0.0f;
-    if (tiot_output_floor_ms > (float)WINDOW_SIZE) {
-        tiot_output_floor_ms = (float)WINDOW_SIZE;
-    }
-
-    float limited_output = requested_output;
-    if (limited_output < tiot_output_floor_ms) {
-        limited_output = tiot_output_floor_ms;
-    }
-
-    /* ----------------------------------------------------------------------
-     * V2 ENDPOINT DEADLINE CAPTURE
-     * ----------------------------------------------------------------------
-     * Passive coast model after SSR OFF:
-     *
-     *   r(t) = r0 * exp(-t/tau)
-     *   DeltaT_coast = r0 * tau * (1 - exp(-t/tau))
-     *
-     * V1 assumed the measured slope persisted too long. V2 uses a dedicated
-     * fast 1.5 s slope so it can detect slope collapse during coast and recover
-     * before the fixed deadline instead of remaining OFF for tens of seconds.
+    /* Signed rate feedback is the damping term. It adds power while the actual
+     * slope is too low and removes power while the furnace is accelerating too
+     * quickly. Unlike the old positive-only floor, it can actively correct an
+     * ahead-of-profile condition.
      */
-    const bool capture_active =
-        (remaining_sec <= TIOT_CAPTURE_WINDOW_SEC) ||
-        (target_error <= TIOT_CAPTURE_BAND_C);
+    const float rate_error =
+        tiot_required_rate_c_per_min - measured_rate;
+    float limited_output = rate_feedforward_ms +
+        (rate_error * TIOT_RATE_FEEDBACK_MS_PER_C_MIN);
 
-    const float remaining_min = (float)remaining_sec / 60.0f;
-    float coast_rise_c = 0.0f;
-    if (capture_active && remaining_min > 0.0f &&
-        fast_positive_rate > TIOT_RATE_EST_MIN_C_MIN) {
-        const float tau = TIOT_BRAKE_TIME_MIN;
-        if (tau > 0.001f) {
-            coast_rise_c = fast_positive_rate * tau *
-                (1.0f - expf(-remaining_min / tau));
-        }
+    if (limited_output < 0.0f) limited_output = 0.0f;
+    if (limited_output > (float)WINDOW_SIZE) {
+        limited_output = (float)WINDOW_SIZE;
     }
 
-    tiot_predicted_temp_c = safety_temp + coast_rise_c;
-    const float protected_target = target_temp - TIOT_ENDPOINT_MARGIN_C;
-    const float predicted_endpoint_error =
-        protected_target - tiot_predicted_temp_c;
-
-    if (capture_active) {
-        float zone_cap_ms;
-        if (target_error > 8.0f) {
-            zone_cap_ms = TIOT_CAP_ERROR_8C_MS;
-        } else if (target_error > 5.0f) {
-            zone_cap_ms = TIOT_CAP_ERROR_5C_MS;
-        } else if (target_error > 3.0f) {
-            zone_cap_ms = TIOT_CAP_ERROR_3C_MS;
-        } else if (target_error > 1.5f) {
-            zone_cap_ms = TIOT_CAP_ERROR_1P5C_MS;
-        } else if (target_error > 0.7f) {
-            zone_cap_ms = TIOT_CAP_ERROR_0P7C_MS;
-        } else {
-            zone_cap_ms = TIOT_CAP_ERROR_NEAR_MS;
-        }
-
-        /* Stopping-rate cap is used only after the passive deadline prediction
-         * is already close. If predicted endpoint is low, recovery authority is
-         * preserved so the controller can close the observed 5..6 degC deficit.
-         */
-        float stopping_rate_limit =
-            (target_error - TIOT_ENDPOINT_MARGIN_C) /
-            TIOT_BRAKE_TIME_MIN;
-        if (stopping_rate_limit < 0.0f) stopping_rate_limit = 0.0f;
-        if (stopping_rate_limit > rate_est) stopping_rate_limit = rate_est;
-
-        float stopping_cap_ms =
-            (stopping_rate_limit / rate_est) * (float)WINDOW_SIZE;
-        if (stopping_cap_ms > 0.0f) {
-            stopping_cap_ms += TIOT_BRAKE_CAP_HEADROOM_MS;
-        }
-        if (stopping_cap_ms > zone_cap_ms) stopping_cap_ms = zone_cap_ms;
-        if (stopping_cap_ms > (float)WINDOW_SIZE) {
-            stopping_cap_ms = (float)WINDOW_SIZE;
-        }
-
-        /* Coast only when the fast decaying-rate model predicts arrival at the
-         * protected target at the ACTUAL deadline with no more heater energy.
-         */
-        if (tiot_predicted_temp_c >= protected_target &&
-            fast_positive_rate > TIOT_RATE_EST_MIN_C_MIN) {
-            limited_output = 0.0f;
-            Output = 0.0f;
-            pid_heater.outputSum = 0.0f;
-            tiot_output_floor_ms = 0.0f;
-        } else {
-            /* Deadline recovery without final-force: convert predicted endpoint
-             * deficit into only the extra average rate needed before timeout.
-             */
-            float recovery_floor_ms = 0.0f;
-            if (remaining_min > 0.0f &&
-                predicted_endpoint_error > TIOT_RECOVERY_TRIGGER_C) {
-                float recovery_rate =
-                    predicted_endpoint_error / remaining_min;
-                if (recovery_rate > rate_est) recovery_rate = rate_est;
-
-                recovery_floor_ms =
-                    (recovery_rate / rate_est) * (float)WINDOW_SIZE *
-                    TIOT_RECOVERY_SAFETY_FACTOR;
-                if (recovery_floor_ms > zone_cap_ms) {
-                    recovery_floor_ms = zone_cap_ms;
-                }
-                if (recovery_floor_ms < 0.0f) recovery_floor_ms = 0.0f;
-            }
-
-            if (limited_output < recovery_floor_ms) {
-                limited_output = recovery_floor_ms;
-            }
-
-            float final_cap_ms = zone_cap_ms;
-            if (predicted_endpoint_error <= TIOT_RECOVERY_TRIGGER_C &&
-                stopping_cap_ms < final_cap_ms) {
-                final_cap_ms = stopping_cap_ms;
-            }
-
-            if (limited_output > final_cap_ms) {
-                limited_output = final_cap_ms;
-            }
-
-            if (pid_heater.outputSum > final_cap_ms) {
-                pid_heater.outputSum = final_cap_ms;
-            }
-            if (pid_heater.outputSum < 0.0f) {
-                pid_heater.outputSum = 0.0f;
-            }
-        }
+    /* Short receding-horizon guard against running ahead of the linear ramp.
+     * Compare predicted furnace temperature with the future ramp reference at
+     * the same instant. If predicted ahead, proportionally reduce the SSR duty;
+     * one full brake band ahead means SSR OFF. Near timeout, future_reference is
+     * clamped to the final target, so the same guard also prevents powered
+     * overshoot beyond Setpoint without aiming below Setpoint.
+     */
+    float lookahead_min = (float)remaining_sec / 60.0f;
+    if (lookahead_min > TIOT_TRAJECTORY_LOOKAHEAD_MIN) {
+        lookahead_min = TIOT_TRAJECTORY_LOOKAHEAD_MIN;
     }
+    if (lookahead_min < 0.0f) lookahead_min = 0.0f;
+
+    const float prediction_rate =
+        (fast_positive_rate > slow_positive_rate)
+            ? fast_positive_rate
+            : slow_positive_rate;
+    tiot_predicted_temp_c = safety_temp +
+        (prediction_rate * lookahead_min);
+
+    float future_reference = tiot_ideal_temp_c +
+        (tiot_planned_rate_c_per_min * lookahead_min);
+    if (future_reference > target_temp) future_reference = target_temp;
+
+    const float predicted_ahead_c =
+        tiot_predicted_temp_c - future_reference;
+    if (predicted_ahead_c > 0.0f) {
+        float brake_fraction = 1.0f -
+            (predicted_ahead_c / TIOT_TRAJECTORY_BRAKE_BAND_C);
+        if (brake_fraction < 0.0f) brake_fraction = 0.0f;
+        limited_output *= brake_fraction;
+    }
+
+    tiot_output_floor_ms = rate_feedforward_ms;
 
     /* Avoid unusable sub-deadband pulses, but keep one useful pulse when the
-     * endpoint predictor is genuinely below the protected target.
+     * actual temperature is behind the programmed line.
      */
     if (limited_output > 0.0f && limited_output < TIOT_MIN_USEFUL_PULSE_MS) {
-        if (target_error > TIOT_TARGET_TOLERANCE_C &&
-            tiot_predicted_temp_c < protected_target) {
+        if (pace_error > TIOT_TARGET_TOLERANCE_C &&
+            target_error > TIOT_TARGET_TOLERANCE_C) {
             limited_output = TIOT_MIN_USEFUL_PULSE_MS;
         } else {
             limited_output = 0.0f;
@@ -1100,7 +983,11 @@ static float Limit_TIOT_Output(float requested_output,
         limited_output = (float)WINDOW_SIZE;
     }
 
-    if (Output > limited_output) Output = limited_output;
+    /* Align the PID-visible state with the actuator command. This controller is
+     * the TIOT outer loop; MT resets/reseeds PID on mode entry as before.
+     */
+    Output = limited_output;
+    pid_heater.outputSum = limited_output;
     return limited_output;
 }
 
@@ -1558,6 +1445,7 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
 
         tiot_ideal_temp_c = Input;
         tiot_command_setpoint_c = Input;
+        tiot_planned_rate_c_per_min = 0.0f;
         tiot_required_rate_c_per_min = 0.0f;
         tiot_output_floor_ms = 0.0f;
         tiot_predicted_temp_c = Input;
