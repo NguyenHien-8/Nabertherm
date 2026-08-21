@@ -398,6 +398,7 @@ static uint32_t Interval_Duration_Seconds(uint8_t interval_index);
 static void Sanitize_Settings(void);
 static void Commit_Pending_Edit(void);
 static void Stop_Heating_Control(void);
+static void Stop_Profile_To_Idle(void);
 static void Pause_Profile(void);
 static bool Resume_Profile(void);
 static bool Start_Profile(void);
@@ -528,6 +529,28 @@ static void Stop_Heating_Control(void) {
     tiot_required_rate_c_per_min = 0.0f;
     tiot_output_floor_ms = 0.0f;
     tiot_predicted_temp_c = Input;
+}
+
+static void Stop_Profile_To_Idle(void) {
+    /* Stop the actuator first, then atomically reset the scheduler clock/state
+     * shared with the 1 Hz TIM2 interrupt. UI_STATE_MAIN renders SYS_IDLE as
+     * P0/... and Run_Total_Seconds == 0 as 00:00:00.
+     */
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    System_Run_State = SYS_IDLE;
+    Run_Total_Seconds = 0U;
+    Current_Interval = 1U;
+    Current_Interval_Start_Sec = 0U;
+    Target_Run_Seconds = 0U;
+    if (primask == 0U) __enable_irq();
+
+    Current_Interval_Start_Temp = Input;
+    paused_pid_output_sum = 0.0f;
+    paused_active_output_ms = 0.0f;
+    Stop_Heating_Control();
 }
 
 static void Pause_Profile(void) {
@@ -1608,7 +1631,13 @@ void Process_Buttons(void) {
     // 2. REDIRECT BUTTON (PA9)
     // ---------------------------------------------------------
     if (redirect_event) {
-        if (Current_UI_State == UI_STATE_SET_P) {
+        if (Current_UI_State == UI_STATE_MAIN &&
+            (System_Run_State == SYS_RUNNING ||
+             System_Run_State == SYS_PAUSED)) {
+            Stop_Profile_To_Idle();
+            LCD_Needs_Update = true;
+            return; /* Ignore simultaneous events after the process is stopped. */
+        } else if (Current_UI_State == UI_STATE_SET_P) {
             Setting_P_Index++;
             if (Setting_P_Index > Total_Intervals) Setting_P_Index = 1U;
         } else if (Current_UI_State == UI_STATE_SET_TEMP) {
