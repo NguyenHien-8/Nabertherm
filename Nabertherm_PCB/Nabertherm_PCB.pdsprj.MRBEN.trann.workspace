@@ -1,11 +1,11 @@
 <?xml version='1.0' encoding='UTF-8' standalone='yes'?>
 <WORKSPACE>
  <FRAME activewindow="0">
-  <PLACEMENT>2c00000002000000030000000083ffff0083ffffffffffffffffffff00000000170000000f060000fc030000</PLACEMENT>
+  <PLACEMENT>2c00000002000000020000000083ffff0083ffffffffffffffffffff00000000170000000f060000fc030000</PLACEMENT>
   <WINDOW type="default" module="ISIS">
-   <editor metric="0" gridmajor="2540000" mode="00000000" zoom="0" scale="120" flipped="0" gridminor="508000" gridmode="0" snapidx="0" snap="25400" xcursor="32" orgmode="0" snaprange="105833">
+   <editor metric="0" gridmajor="2540000" mode="00000000" zoom="-1" scale="120" flipped="0" gridminor="508000" gridmode="0" snapidx="0" snap="25400" xcursor="32" orgmode="0" snaprange="105833">
     <world y1="-8890000" x1="-12700000" y2="8890000" x2="12700000"/>
-    <centre x="0" y="0"/>
+    <centre x="0" y="10583"/>
     <origin x="0" y="0"/>
    </editor>
   </WINDOW>
@@ -18,9 +18,9 @@
   </WINDOW>
   <WINDOW type="VIEW3D" module="VIEW3D">
    <camera>
-    <position x="3546051" y="148799" z="19518916"/>
+    <position x="3546051" y="-13653158" z="13801957"/>
     <focus x="3546051" y="148799" z="0"/>
-    <up x="0" y="1000000" z="0"/>
+    <up x="0" y="707106" z="707106"/>
    </camera>
   </WINDOW>
  </FRAME>
@@ -32,9 +32,9 @@
   </editor>
  </MODULE>
  <MODULE name="ISIS">
-  <editor metric="0" gridmajor="2540000" mode="00000000" zoom="0" scale="120" flipped="0" gridminor="508000" gridmode="0" snapidx="0" snap="25400" xcursor="32" orgmode="0" snaprange="105833">
+  <editor metric="0" gridmajor="2540000" mode="00000000" zoom="-1" scale="120" flipped="0" gridminor="508000" gridmode="0" snapidx="0" snap="25400" xcursor="32" orgmode="0" snaprange="105833">
    <world y1="-8890000" x1="-12700000" y2="8890000" x2="12700000"/>
-   <centre x="0" y="0"/>
+   <centre x="0" y="10583"/>
    <origin x="0" y="0"/>
   </editor>
  </MODULE>
