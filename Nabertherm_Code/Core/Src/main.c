@@ -54,8 +54,15 @@ typedef enum {
     UI_STATE_SET_INTERVAL,
     UI_STATE_SET_P,
     UI_STATE_SET_TEMP,
-    UI_STATE_SET_TIME
+    UI_STATE_SET_TIME,
+    UI_STATE_PROGRAM_MANAGER,
+    UI_STATE_OPERATION_CONFIRM
 } UIState_t;
+
+typedef enum {
+    CONFIRM_ACTION_SAVE,
+    CONFIRM_ACTION_DELETE
+} ConfirmAction_t;
 
 /* Heating Modes */
 typedef enum {
@@ -96,9 +103,14 @@ typedef struct {
 // 200ms software debounce prevents mechanical button switch bouncing
 // from triggering multiple interrupts.
 #define DEBOUNCE_DELAY 200
+#define BUTTON_LONG_PRESS_MS             1200U
+#define OPERATION_CONFIRM_DISPLAY_MS     1200U
 
 // Max segments allowed by the system memory/requirements.
 #define MAX_INTERVALS 9
+#define MAX_PROGRAMS  9
+#define NO_PROGRAM_SLOT                  0xFFU
+#define PROGRAM_VALID_MARKER             0x43505247UL /* "CPRG" */
 
 // Variable for Time-Proportional Control (Slow PWM)
 #define WINDOW_SIZE 1000
@@ -233,7 +245,8 @@ typedef struct {
 // Using the last page ensures we do not accidentally overwrite application code.
 #define FLASH_STORAGE_ADDR 0x0800FC00
 #define FLASH_MAGIC_WORD   0xAABBCCDE
-#define FLASH_DATA_VERSION 2U
+#define FLASH_DATA_VERSION 3U
+#define FLASH_LEGACY_VERSION 2U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -253,17 +266,45 @@ TIM_HandleTypeDef htim2;
 MAX31856_HandleTypeDef max31856;
 PID_TypeDef pid_heater;
 
-/* * Flash Storage Wrapper Structure
- * This struct perfectly aligns our variables for easy writing/reading
- * to the internal flash using 32-bit Words.
+/* Version-2 record retained only for one-time migration. */
+typedef struct {
+    uint32_t MagicWord;
+    uint32_t Version;
+    uint32_t TotalIntervals;
+    Interval_TypeDef Intervals[MAX_INTERVALS];
+    uint32_t Checksum;
+} Legacy_Flash_Data_t;
+
+typedef struct {
+    uint32_t ValidMarker;
+    uint32_t TotalIntervals;
+    Interval_TypeDef Intervals[MAX_INTERVALS];
+} Stored_Program_t;
+
+/* Version-3 record: one working profile plus nine named program slots C1...C9.
+ * A global checksum covers the complete database. The staging object is global
+ * instead of stack-local because the STM32F103 project reserves only 1 KiB stack.
  */
 typedef struct {
-    uint32_t MagicWord;      // Validation flag.
+    uint32_t MagicWord;
     uint32_t Version;
-    uint32_t TotalIntervals; // Cast from uint8_t to uint32_t for alignment.
-    Interval_TypeDef Intervals[MAX_INTERVALS]; // Payload.
+    uint32_t ActiveProgramSlot;
+    uint32_t WorkingTotalIntervals;
+    Interval_TypeDef WorkingIntervals[MAX_INTERVALS];
+    Stored_Program_t Programs[MAX_PROGRAMS];
     uint32_t Checksum;
 } Flash_Data_t;
+
+_Static_assert(sizeof(Flash_Data_t) <= 1024U,
+               "Program database exceeds STM32F103 1 KiB Flash page");
+_Static_assert((sizeof(Flash_Data_t) % 4U) == 0U,
+               "Program database must be word aligned for Flash programming");
+
+Flash_Data_t flash_staging_data;
+Stored_Program_t Stored_Programs[MAX_PROGRAMS];
+/* Main-loop-only rollback buffer avoids placing an 80-byte program record on
+ * the STM32F103's small call stack while Flash HAL routines are nested. */
+Stored_Program_t program_rollback_data;
 
 // ================= PID PARAMETTERS & NOISE FILTER =================
 float Input, Output, Setpoint;
@@ -294,11 +335,27 @@ volatile uint32_t last_time_PA10 = 0;
 volatile uint32_t last_time_PA11 = 0;
 volatile uint32_t last_time_PB15 = 0;
 
-volatile uint8_t button_setting = 0;    // PA8 -> Setting/Run
-volatile uint8_t button_redirect = 0;   // PA9 -> Redirect
-volatile uint8_t button_select = 0;     // PB15 -> OK/Select
+volatile uint8_t button_setting = 0;    // PA8 short -> Setting/Run
+volatile uint8_t button_setting_long = 0;
+volatile uint8_t button_setting_press = 0;
+volatile uint8_t button_redirect = 0;   // PA9 short -> Redirect
+volatile uint8_t button_redirect_long = 0;
+volatile uint8_t button_redirect_press = 0;
+volatile uint8_t button_select = 0;     // PB15 short -> OK/Select
+volatile uint8_t button_select_long = 0;
+volatile uint8_t button_select_press = 0;
 volatile uint8_t button_tang = 0;       // PA11 -> UP
 volatile uint8_t button_giam = 0;       // PA10 -> DOWN
+
+bool setting_press_tracking = false;
+bool setting_long_emitted = false;
+uint32_t setting_press_start_ms = 0U;
+bool redirect_press_tracking = false;
+bool redirect_long_emitted = false;
+uint32_t redirect_press_start_ms = 0U;
+bool select_press_tracking = false;
+bool select_long_emitted = false;
+uint32_t select_press_start_ms = 0U;
 
 // ================= SYSTEM LOGIC & UI =================
 /* System Logic & Payload Variables */
@@ -330,6 +387,18 @@ uint8_t Setting_P_Index = 1;        // Tracks which interval (P1...Pn) is being 
 uint8_t Menu_Cursor = 0;            // 0: Mode, 1: Set Temp, 2: Set Time.
 uint8_t Temp_Digit_Index = 0;       // For individual digit blinking (Thousands, Hundreds, etc.).
 uint8_t Time_Field_Index = 0;       // 0: Hour, 1: Min, 2: Sec.
+
+/* Saved-program manager and transient operation-confirmation UI. */
+uint8_t Active_Program_Slot = NO_PROGRAM_SLOT;
+uint8_t Working_Program_Slot = NO_PROGRAM_SLOT;
+uint8_t Program_Manager_Selection = 0U;
+uint8_t Program_Manager_Top = 0U;
+bool Editing_From_Program_Manager = false;
+UIState_t Confirmation_Return_State = UI_STATE_MAIN;
+uint32_t Confirmation_Until_Ms = 0U;
+bool Confirmation_Success = false;
+ConfirmAction_t Confirmation_Action = CONFIRM_ACTION_SAVE;
+uint8_t Confirmation_Program_Slot = NO_PROGRAM_SLOT;
 
 /* Temporary Editing Buffers */
 // Edits are stored here first, and only pushed to the actual Interval struct upon pressing 'Select'.
@@ -394,11 +463,25 @@ void Init_Default_Intervals(void);
 void Save_Settings_To_Flash(void);
 void Load_Settings_From_Flash(void);
 static void Copy_To_LCD_Row(char row[17], const char *text);
+static void Update_Hold_Button_Events(uint32_t now_ms);
+static void Update_Transient_UI(uint32_t now_ms);
+static bool Is_Setting_UI_State(UIState_t state);
 static uint32_t Interval_Duration_Seconds(uint8_t interval_index);
 static void Sanitize_Settings(void);
+static void Sanitize_Program(Stored_Program_t *program);
 static void Commit_Pending_Edit(void);
+static uint8_t Program_Manager_Saved_Count(void);
+static uint8_t Program_Manager_Slot_At(uint8_t list_index);
+static void Program_Manager_Keep_Selection_Visible(void);
+static void Enter_Program_Manager(void);
+static bool Load_Program_Slot(uint8_t slot);
+static bool Save_Working_Program(uint8_t slot);
+static bool Delete_Stored_Program(uint8_t slot);
+static void Begin_Operation_Confirmation(ConfirmAction_t action, bool success,
+                                         uint8_t slot, UIState_t return_state);
 static void Stop_Heating_Control(void);
 static void Stop_Profile_To_Idle(void);
+static void Exit_To_Main_Idle(void);
 static void Pause_Profile(void);
 static bool Resume_Profile(void);
 static bool Start_Profile(void);
@@ -421,6 +504,7 @@ static float Limit_MT_Output(float requested_output, float target_temp, float in
 static void Read_Temperature_Task(uint32_t now_ms);
 static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds);
 static void Trip_Control_Fault(ControlFault_t fault);
+static uint32_t Flash_Checksum_Bytes(const void *data, size_t count);
 static uint32_t Flash_Checksum(const Flash_Data_t *data);
 /* USER CODE END PFP */
 
@@ -434,15 +518,113 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
     uint32_t current_time = HAL_GetTick();
 
     if (GPIO_Pin == GPIO_PIN_8 && (current_time - last_time_PA8 > DEBOUNCE_DELAY)) {
-        button_setting = 1; last_time_PA8 = current_time;
+        button_setting_press = 1; last_time_PA8 = current_time;
     } else if (GPIO_Pin == GPIO_PIN_9 && (current_time - last_time_PA9 > DEBOUNCE_DELAY)) {
-        button_redirect = 1; last_time_PA9 = current_time;
+        button_redirect_press = 1; last_time_PA9 = current_time;
     } else if (GPIO_Pin == GPIO_PIN_15 && (current_time - last_time_PB15 > DEBOUNCE_DELAY)) {
-        button_select = 1; last_time_PB15 = current_time;
+        button_select_press = 1; last_time_PB15 = current_time;
     } else if (GPIO_Pin == GPIO_PIN_11 && (current_time - last_time_PA11 > DEBOUNCE_DELAY)) {
         button_tang = 1; last_time_PA11 = current_time;
     } else if (GPIO_Pin == GPIO_PIN_10 && (current_time - last_time_PA10 > DEBOUNCE_DELAY)) {
         button_giam = 1; last_time_PA10 = current_time;
+    }
+}
+
+static void Update_Hold_Button_Events(uint32_t now_ms) {
+    uint8_t setting_press_event;
+    uint8_t redirect_press_event;
+    uint8_t select_press_event;
+
+    /* EXTI supplies the rising/pressed edge. Release is polled so no CubeMX
+     * change to falling-edge interrupts is required.
+     */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    setting_press_event = button_setting_press;
+    button_setting_press = 0U;
+    redirect_press_event = button_redirect_press;
+    button_redirect_press = 0U;
+    select_press_event = button_select_press;
+    button_select_press = 0U;
+    if (primask == 0U) __enable_irq();
+
+    if (setting_press_event != 0U) {
+        setting_press_tracking = true;
+        setting_long_emitted = false;
+        setting_press_start_ms = last_time_PA8;
+    }
+    if (redirect_press_event != 0U) {
+        redirect_press_tracking = true;
+        redirect_long_emitted = false;
+        redirect_press_start_ms = last_time_PA9;
+    }
+    if (select_press_event != 0U) {
+        select_press_tracking = true;
+        select_long_emitted = false;
+        select_press_start_ms = last_time_PB15;
+    }
+
+    if (setting_press_tracking) {
+        const bool pressed =
+            (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_8) == GPIO_PIN_SET);
+        const uint32_t held_ms = now_ms - setting_press_start_ms;
+
+        if (pressed && !setting_long_emitted &&
+            held_ms >= BUTTON_LONG_PRESS_MS) {
+            button_setting_long = 1U;
+            setting_long_emitted = true;
+        } else if (!pressed) {
+            if (!setting_long_emitted) button_setting = 1U;
+            setting_press_tracking = false;
+            setting_long_emitted = false;
+        }
+    }
+
+    if (redirect_press_tracking) {
+        const bool pressed =
+            (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_9) == GPIO_PIN_SET);
+        const uint32_t held_ms = now_ms - redirect_press_start_ms;
+
+        if (pressed && !redirect_long_emitted &&
+            held_ms >= BUTTON_LONG_PRESS_MS) {
+            button_redirect_long = 1U;
+            redirect_long_emitted = true;
+        } else if (!pressed) {
+            if (!redirect_long_emitted) button_redirect = 1U;
+            redirect_press_tracking = false;
+            redirect_long_emitted = false;
+        }
+    }
+
+    if (select_press_tracking) {
+        const bool pressed =
+            (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15) == GPIO_PIN_SET);
+        const uint32_t held_ms = now_ms - select_press_start_ms;
+
+        if (pressed && !select_long_emitted &&
+            held_ms >= BUTTON_LONG_PRESS_MS) {
+            button_select_long = 1U;
+            select_long_emitted = true;
+        } else if (!pressed) {
+            if (!select_long_emitted) button_select = 1U;
+            select_press_tracking = false;
+            select_long_emitted = false;
+        }
+    }
+}
+
+static bool Is_Setting_UI_State(UIState_t state) {
+    return (state == UI_STATE_SET_INTERVAL) ||
+           (state == UI_STATE_SET_P) ||
+           (state == UI_STATE_SET_TEMP) ||
+           (state == UI_STATE_SET_TIME);
+}
+
+static void Update_Transient_UI(uint32_t now_ms) {
+    if (Current_UI_State == UI_STATE_OPERATION_CONFIRM &&
+        (int32_t)(now_ms - Confirmation_Until_Ms) >= 0) {
+        Current_UI_State = Confirmation_Return_State;
+        LCD_Needs_Update = true;
     }
 }
 
@@ -493,6 +675,31 @@ static void Sanitize_Settings(void) {
     }
 }
 
+static void Sanitize_Program(Stored_Program_t *program) {
+    if (program == NULL) return;
+
+    if (program->TotalIntervals < 1U ||
+        program->TotalIntervals > MAX_INTERVALS) {
+        program->TotalIntervals = 1U;
+    }
+
+    for (uint8_t i = 0U; i < MAX_INTERVALS; i++) {
+        if (program->Intervals[i].Mode != MODE_MT &&
+            program->Intervals[i].Mode != MODE_TIOT) {
+            program->Intervals[i].Mode = MODE_MT;
+        }
+        if (program->Intervals[i].Temp > PROCESS_MAX_TEMP_C) {
+            program->Intervals[i].Temp = PROCESS_MAX_TEMP_C;
+        }
+        if (program->Intervals[i].Time_Min > 59U) {
+            program->Intervals[i].Time_Min = 59U;
+        }
+        if (program->Intervals[i].Time_Sec > 59U) {
+            program->Intervals[i].Time_Sec = 59U;
+        }
+    }
+}
+
 static void Commit_Pending_Edit(void) {
     if (Setting_P_Index < 1U || Setting_P_Index > Total_Intervals) return;
 
@@ -506,6 +713,128 @@ static void Commit_Pending_Edit(void) {
         Intervals[Setting_P_Index - 1U].Time_Min = Time_Edit_M;
         Intervals[Setting_P_Index - 1U].Time_Sec = Time_Edit_S;
     }
+}
+
+static uint8_t Program_Manager_Saved_Count(void) {
+    uint8_t count = 0U;
+    for (uint8_t i = 0U; i < MAX_PROGRAMS; i++) {
+        if (Stored_Programs[i].ValidMarker == PROGRAM_VALID_MARKER) count++;
+    }
+    return count;
+}
+
+static uint8_t Program_Manager_Slot_At(uint8_t list_index) {
+    uint8_t found = 0U;
+
+    for (uint8_t slot = 0U; slot < MAX_PROGRAMS; slot++) {
+        if (Stored_Programs[slot].ValidMarker != PROGRAM_VALID_MARKER) continue;
+        if (found == list_index) return slot;
+        found++;
+    }
+    return NO_PROGRAM_SLOT;
+}
+
+static void Program_Manager_Keep_Selection_Visible(void) {
+    const uint8_t count = Program_Manager_Saved_Count();
+    if (count == 0U) {
+        Program_Manager_Selection = 0U;
+        Program_Manager_Top = 0U;
+        return;
+    }
+
+    if (Program_Manager_Selection >= count) Program_Manager_Selection = 0U;
+    if (Program_Manager_Selection < Program_Manager_Top) {
+        Program_Manager_Top = Program_Manager_Selection;
+    } else if (Program_Manager_Selection >=
+               (uint8_t)(Program_Manager_Top + 2U)) {
+        Program_Manager_Top = Program_Manager_Selection - 1U;
+    }
+
+    const uint8_t maximum_top = (count > 2U) ? (count - 2U) : 0U;
+    if (Program_Manager_Top > maximum_top) Program_Manager_Top = maximum_top;
+}
+
+static void Enter_Program_Manager(void) {
+    Stop_Profile_To_Idle();
+    Editing_From_Program_Manager = false;
+    Working_Program_Slot = NO_PROGRAM_SLOT;
+    Program_Manager_Selection = 0U;
+    Program_Manager_Top = 0U;
+    Current_UI_State = UI_STATE_PROGRAM_MANAGER;
+    LCD_Needs_Update = true;
+}
+
+static bool Load_Program_Slot(uint8_t slot) {
+    if (slot >= MAX_PROGRAMS ||
+        Stored_Programs[slot].ValidMarker != PROGRAM_VALID_MARKER) {
+        return false;
+    }
+
+    Total_Intervals = (uint8_t)Stored_Programs[slot].TotalIntervals;
+    memcpy(Intervals, Stored_Programs[slot].Intervals, sizeof(Intervals));
+    Sanitize_Settings();
+    Active_Program_Slot = slot;
+    Working_Program_Slot = slot;
+    return true;
+}
+
+static bool Save_Working_Program(uint8_t slot) {
+    if (slot >= MAX_PROGRAMS) return false;
+
+    Sanitize_Settings();
+    program_rollback_data = Stored_Programs[slot];
+    const uint8_t previous_active_slot = Active_Program_Slot;
+    const uint8_t previous_working_slot = Working_Program_Slot;
+
+    Stored_Programs[slot].ValidMarker = PROGRAM_VALID_MARKER;
+    Stored_Programs[slot].TotalIntervals = (uint32_t)Total_Intervals;
+    memcpy(Stored_Programs[slot].Intervals, Intervals, sizeof(Intervals));
+    Active_Program_Slot = slot;
+    Working_Program_Slot = slot;
+    Save_Settings_To_Flash();
+
+    if (!flash_write_ok) {
+        Stored_Programs[slot] = program_rollback_data;
+        Active_Program_Slot = previous_active_slot;
+        Working_Program_Slot = previous_working_slot;
+        return false;
+    }
+    return true;
+}
+
+static bool Delete_Stored_Program(uint8_t slot) {
+    if (slot >= MAX_PROGRAMS ||
+        Stored_Programs[slot].ValidMarker != PROGRAM_VALID_MARKER) {
+        return false;
+    }
+
+    program_rollback_data = Stored_Programs[slot];
+    const uint8_t previous_active_slot = Active_Program_Slot;
+    const uint8_t previous_working_slot = Working_Program_Slot;
+
+    memset(&Stored_Programs[slot], 0, sizeof(Stored_Programs[slot]));
+    if (Active_Program_Slot == slot) Active_Program_Slot = NO_PROGRAM_SLOT;
+    if (Working_Program_Slot == slot) Working_Program_Slot = NO_PROGRAM_SLOT;
+    Save_Settings_To_Flash();
+
+    if (!flash_write_ok) {
+        Stored_Programs[slot] = program_rollback_data;
+        Active_Program_Slot = previous_active_slot;
+        Working_Program_Slot = previous_working_slot;
+        return false;
+    }
+    return true;
+}
+
+static void Begin_Operation_Confirmation(ConfirmAction_t action, bool success,
+                                         uint8_t slot, UIState_t return_state) {
+    Confirmation_Action = action;
+    Confirmation_Success = success;
+    Confirmation_Program_Slot = slot;
+    Confirmation_Return_State = return_state;
+    Confirmation_Until_Ms = HAL_GetTick() + OPERATION_CONFIRM_DISPLAY_MS;
+    Current_UI_State = UI_STATE_OPERATION_CONFIRM;
+    LCD_Needs_Update = true;
 }
 
 static void Stop_Heating_Control(void) {
@@ -551,6 +880,14 @@ static void Stop_Profile_To_Idle(void) {
     paused_pid_output_sum = 0.0f;
     paused_active_output_ms = 0.0f;
     Stop_Heating_Control();
+}
+
+static void Exit_To_Main_Idle(void) {
+    Stop_Profile_To_Idle();
+    Editing_From_Program_Manager = false;
+    Working_Program_Slot = NO_PROGRAM_SLOT;
+    Current_UI_State = UI_STATE_MAIN;
+    LCD_Needs_Update = true;
 }
 
 static void Pause_Profile(void) {
@@ -1592,20 +1929,128 @@ static void Update_PID_And_SSR(uint32_t now_ms, uint32_t current_run_seconds) {
   */
 void Process_Buttons(void) {
     uint8_t setting_event;
+    uint8_t setting_long_event;
     uint8_t redirect_event;
+    uint8_t redirect_long_event;
     uint8_t select_event;
+    uint8_t select_long_event;
     uint8_t up_event;
     uint8_t down_event;
+
+    const uint32_t now_ms = HAL_GetTick();
+    Update_Hold_Button_Events(now_ms);
+    Update_Transient_UI(now_ms);
 
     /* Atomically snapshot and clear ISR-owned event flags. */
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
     setting_event = button_setting;   button_setting = 0U;
+    setting_long_event = button_setting_long; button_setting_long = 0U;
     redirect_event = button_redirect; button_redirect = 0U;
+    redirect_long_event = button_redirect_long; button_redirect_long = 0U;
     select_event = button_select;     button_select = 0U;
+    select_long_event = button_select_long; button_select_long = 0U;
     up_event = button_tang;           button_tang = 0U;
     down_event = button_giam;         button_giam = 0U;
     if (primask == 0U) __enable_irq();
+
+    /* Confirmation is deliberately modal for its short display interval. */
+    if (Current_UI_State == UI_STATE_OPERATION_CONFIRM) return;
+
+    // ---------------------------------------------------------
+    // 0. LONG SETTING (PA8) -> SAVED PROGRAM MANAGER
+    // ---------------------------------------------------------
+    if (setting_long_event) {
+        if (Current_UI_State == UI_STATE_MAIN) {
+            Enter_Program_Manager();
+        } else if (Is_Setting_UI_State(Current_UI_State)) {
+            Commit_Pending_Edit();
+            Sanitize_Settings();
+            Enter_Program_Manager();
+        }
+        return;
+    }
+
+    // ---------------------------------------------------------
+    // 0b. LONG REDIRECT (PA9) -> SAFE EXIT FROM SETTING TO IDLE
+    // ---------------------------------------------------------
+    if (redirect_long_event) {
+        if (Is_Setting_UI_State(Current_UI_State) ||
+            Current_UI_State == UI_STATE_PROGRAM_MANAGER ||
+            (Current_UI_State == UI_STATE_MAIN &&
+             (System_Run_State == SYS_RUNNING ||
+              System_Run_State == SYS_PAUSED))) {
+            Exit_To_Main_Idle();
+        }
+        return;
+    }
+
+    // ---------------------------------------------------------
+    // 0c. LONG SELECT (PB15) -> DELETE IN MANAGER / SAVE IN SETTING
+    // ---------------------------------------------------------
+    if (select_long_event) {
+        if (Current_UI_State == UI_STATE_PROGRAM_MANAGER) {
+            const uint8_t deleted_slot =
+                Program_Manager_Slot_At(Program_Manager_Selection);
+
+            if (deleted_slot < MAX_PROGRAMS) {
+                const bool deleted = Delete_Stored_Program(deleted_slot);
+                if (deleted) {
+                    const uint8_t remaining = Program_Manager_Saved_Count();
+                    if (remaining == 0U) {
+                        Program_Manager_Selection = 0U;
+                        Program_Manager_Top = 0U;
+                    } else {
+                        if (Program_Manager_Selection >= remaining) {
+                            Program_Manager_Selection = remaining - 1U;
+                        }
+                        Program_Manager_Keep_Selection_Visible();
+                    }
+                }
+                Begin_Operation_Confirmation(CONFIRM_ACTION_DELETE, deleted,
+                                             deleted_slot,
+                                             UI_STATE_PROGRAM_MANAGER);
+            }
+            return;
+        }
+
+        const bool is_setting_screen =
+            Is_Setting_UI_State(Current_UI_State);
+
+        if (is_setting_screen) {
+            const UIState_t previous_ui = Current_UI_State;
+            Commit_Pending_Edit();
+            Sanitize_Settings();
+
+            uint8_t save_slot = Working_Program_Slot;
+            if (save_slot >= MAX_PROGRAMS) {
+                for (uint8_t i = 0U; i < MAX_PROGRAMS; i++) {
+                    if (Stored_Programs[i].ValidMarker != PROGRAM_VALID_MARKER) {
+                        save_slot = i;
+                        break;
+                    }
+                }
+            }
+
+            const bool saved = Save_Working_Program(save_slot);
+            UIState_t return_ui = previous_ui;
+            if (saved && Editing_From_Program_Manager) {
+                const uint8_t count = Program_Manager_Saved_Count();
+                for (uint8_t i = 0U; i < count; i++) {
+                    if (Program_Manager_Slot_At(i) == save_slot) {
+                        Program_Manager_Selection = i;
+                        break;
+                    }
+                }
+                Program_Manager_Keep_Selection_Visible();
+                Editing_From_Program_Manager = false;
+                return_ui = UI_STATE_PROGRAM_MANAGER;
+            }
+            Begin_Operation_Confirmation(CONFIRM_ACTION_SAVE, saved,
+                                         save_slot, return_ui);
+        }
+        return;
+    }
 
     // ---------------------------------------------------------
     // 1. SETTING / RUN BUTTON (PA8)
@@ -1615,6 +2060,16 @@ void Process_Buttons(void) {
             Current_UI_State = UI_STATE_SET_INTERVAL;
             System_Run_State = SYS_IDLE;
             Stop_Heating_Control();
+            Editing_From_Program_Manager = false;
+            Working_Program_Slot = NO_PROGRAM_SLOT;
+        } else if (Current_UI_State == UI_STATE_PROGRAM_MANAGER) {
+            const uint8_t slot =
+                Program_Manager_Slot_At(Program_Manager_Selection);
+            if (Load_Program_Slot(slot)) {
+                Editing_From_Program_Manager = false;
+                Current_UI_State = UI_STATE_MAIN;
+                (void)Start_Profile();
+            }
         } else {
             /* PA8 means Save & Exit even when currently inside an edit screen. */
             Commit_Pending_Edit();
@@ -1631,11 +2086,13 @@ void Process_Buttons(void) {
     // 2. REDIRECT BUTTON (PA9)
     // ---------------------------------------------------------
     if (redirect_event) {
-        if (Current_UI_State == UI_STATE_MAIN &&
+        if (Current_UI_State == UI_STATE_PROGRAM_MANAGER) {
+            Exit_To_Main_Idle();
+            return;
+        } else if (Current_UI_State == UI_STATE_MAIN &&
             (System_Run_State == SYS_RUNNING ||
              System_Run_State == SYS_PAUSED)) {
-            Stop_Profile_To_Idle();
-            LCD_Needs_Update = true;
+            Exit_To_Main_Idle();
             return; /* Ignore simultaneous events after the process is stopped. */
         } else if (Current_UI_State == UI_STATE_SET_P) {
             Setting_P_Index++;
@@ -1657,6 +2114,17 @@ void Process_Buttons(void) {
                 Pause_Profile();
             } else if (System_Run_State == SYS_PAUSED) {
                 (void)Resume_Profile();
+            }
+            LCD_Needs_Update = true;
+            return;
+        } else if (Current_UI_State == UI_STATE_PROGRAM_MANAGER) {
+            const uint8_t slot =
+                Program_Manager_Slot_At(Program_Manager_Selection);
+            if (Load_Program_Slot(slot)) {
+                Editing_From_Program_Manager = true;
+                Current_UI_State = UI_STATE_SET_INTERVAL;
+                Setting_P_Index = 1U;
+                Menu_Cursor = 0U;
             }
             LCD_Needs_Update = true;
             return;
@@ -1707,6 +2175,25 @@ void Process_Buttons(void) {
         const bool is_up = (up_event != 0U);
 
         switch (Current_UI_State) {
+            case UI_STATE_PROGRAM_MANAGER: {
+                const uint8_t count = Program_Manager_Saved_Count();
+                if (count > 0U) {
+                    if (is_up) {
+                        Program_Manager_Selection =
+                            (Program_Manager_Selection == 0U)
+                                ? (count - 1U)
+                                : (Program_Manager_Selection - 1U);
+                    } else {
+                        Program_Manager_Selection++;
+                        if (Program_Manager_Selection >= count) {
+                            Program_Manager_Selection = 0U;
+                        }
+                    }
+                    Program_Manager_Keep_Selection_Visible();
+                }
+                break;
+            }
+
             case UI_STATE_SET_INTERVAL:
                 if (is_up && Total_Intervals < MAX_INTERVALS) Total_Intervals++;
                 else if (!is_up && Total_Intervals > 1U) Total_Intervals--;
@@ -1847,6 +2334,60 @@ void Update_LCD(void) {
             Copy_To_LCD_Row(row2, temp_buf);
             break;
 
+        case UI_STATE_PROGRAM_MANAGER: {
+            const uint8_t count = Program_Manager_Saved_Count();
+            if (count == 0U) {
+                Copy_To_LCD_Row(row1, "== NO PROGRAM ==");
+                Copy_To_LCD_Row(row2, "PA9: EXIT");
+                break;
+            }
+
+            Program_Manager_Keep_Selection_Visible();
+            const uint8_t first_list_index = Program_Manager_Top;
+            const uint8_t first_slot =
+                Program_Manager_Slot_At(first_list_index);
+            if (first_slot < MAX_PROGRAMS) {
+                snprintf(temp_buf, sizeof(temp_buf), "%cC%u/P%lu",
+                         (Program_Manager_Selection == first_list_index) ? '>' : ' ',
+                         (unsigned int)(first_slot + 1U),
+                         (unsigned long)Stored_Programs[first_slot].TotalIntervals);
+                Copy_To_LCD_Row(row1, temp_buf);
+            }
+
+            const uint8_t second_list_index = first_list_index + 1U;
+            if (second_list_index < count) {
+                const uint8_t second_slot =
+                    Program_Manager_Slot_At(second_list_index);
+                if (second_slot < MAX_PROGRAMS) {
+                    snprintf(temp_buf, sizeof(temp_buf), "%cC%u/P%lu",
+                             (Program_Manager_Selection == second_list_index) ? '>' : ' ',
+                             (unsigned int)(second_slot + 1U),
+                             (unsigned long)Stored_Programs[second_slot].TotalIntervals);
+                    Copy_To_LCD_Row(row2, temp_buf);
+                }
+            }
+            break;
+        }
+
+        case UI_STATE_OPERATION_CONFIRM:
+            if (Confirmation_Action == CONFIRM_ACTION_DELETE) {
+                Copy_To_LCD_Row(row1, Confirmation_Success
+                    ? "=== DELETED ===" : "DELETE FAILED");
+            } else {
+                Copy_To_LCD_Row(row1, Confirmation_Success
+                    ? "=== SAVED! ===" : "SAVE FAILED");
+            }
+
+            if (Confirmation_Success &&
+                Confirmation_Program_Slot < MAX_PROGRAMS) {
+                snprintf(temp_buf, sizeof(temp_buf), "PROGRAM C%u",
+                         (unsigned int)(Confirmation_Program_Slot + 1U));
+                Copy_To_LCD_Row(row2, temp_buf);
+            } else if (!Confirmation_Success) {
+                Copy_To_LCD_Row(row2, "CHECK FLASH");
+            }
+            break;
+
         default:
             break;
     }
@@ -1887,9 +2428,8 @@ void Init_Default_Intervals(void) {
     Total_Intervals = 1U;
 }
 
-static uint32_t Flash_Checksum(const Flash_Data_t *data) {
+static uint32_t Flash_Checksum_Bytes(const void *data, size_t count) {
     const uint8_t *bytes = (const uint8_t *)data;
-    const size_t count = offsetof(Flash_Data_t, Checksum);
     uint32_t hash = 2166136261UL; /* FNV-1a */
 
     for (size_t i = 0U; i < count; i++) {
@@ -1899,21 +2439,31 @@ static uint32_t Flash_Checksum(const Flash_Data_t *data) {
     return hash;
 }
 
+static uint32_t Flash_Checksum(const Flash_Data_t *data) {
+    return Flash_Checksum_Bytes(data, offsetof(Flash_Data_t, Checksum));
+}
+
 /**
   * @brief  Write validated parameters to the last Flash page.
   */
 void Save_Settings_To_Flash(void) {
     Sanitize_Settings();
 
-    Flash_Data_t flash_data;
-    memset(&flash_data, 0, sizeof(flash_data));
-    flash_data.MagicWord = FLASH_MAGIC_WORD;
-    flash_data.Version = FLASH_DATA_VERSION;
-    flash_data.TotalIntervals = (uint32_t)Total_Intervals;
-    memcpy(flash_data.Intervals, Intervals, sizeof(Intervals));
-    flash_data.Checksum = Flash_Checksum(&flash_data);
+    memset(&flash_staging_data, 0, sizeof(flash_staging_data));
+    flash_staging_data.MagicWord = FLASH_MAGIC_WORD;
+    flash_staging_data.Version = FLASH_DATA_VERSION;
+    flash_staging_data.ActiveProgramSlot =
+        (Active_Program_Slot < MAX_PROGRAMS)
+            ? (uint32_t)Active_Program_Slot
+            : (uint32_t)NO_PROGRAM_SLOT;
+    flash_staging_data.WorkingTotalIntervals = (uint32_t)Total_Intervals;
+    memcpy(flash_staging_data.WorkingIntervals,
+           Intervals, sizeof(Intervals));
+    memcpy(flash_staging_data.Programs,
+           Stored_Programs, sizeof(Stored_Programs));
+    flash_staging_data.Checksum = Flash_Checksum(&flash_staging_data);
 
-    const uint32_t *data_ptr = (const uint32_t *)&flash_data;
+    const uint32_t *data_ptr = (const uint32_t *)&flash_staging_data;
     const uint16_t num_words = (uint16_t)((sizeof(Flash_Data_t) + 3U) / 4U);
     FLASH_EraseInitTypeDef erase = {0};
     uint32_t page_error = 0U;
@@ -1959,15 +2509,63 @@ void Load_Settings_From_Flash(void) {
     const Flash_Data_t *flash_data = (const Flash_Data_t *)FLASH_STORAGE_ADDR;
     const bool header_valid = (flash_data->MagicWord == FLASH_MAGIC_WORD) &&
                               (flash_data->Version == FLASH_DATA_VERSION) &&
-                              (flash_data->TotalIntervals >= 1U) &&
-                              (flash_data->TotalIntervals <= MAX_INTERVALS);
+                              (flash_data->WorkingTotalIntervals >= 1U) &&
+                              (flash_data->WorkingTotalIntervals <= MAX_INTERVALS);
 
     if (header_valid && flash_data->Checksum == Flash_Checksum(flash_data)) {
-        Total_Intervals = (uint8_t)flash_data->TotalIntervals;
-        memcpy(Intervals, flash_data->Intervals, sizeof(Intervals));
+        Total_Intervals = (uint8_t)flash_data->WorkingTotalIntervals;
+        memcpy(Intervals, flash_data->WorkingIntervals, sizeof(Intervals));
+        memcpy(Stored_Programs, flash_data->Programs, sizeof(Stored_Programs));
+
+        for (uint8_t i = 0U; i < MAX_PROGRAMS; i++) {
+            if (Stored_Programs[i].ValidMarker == PROGRAM_VALID_MARKER) {
+                Sanitize_Program(&Stored_Programs[i]);
+            } else {
+                memset(&Stored_Programs[i], 0, sizeof(Stored_Programs[i]));
+            }
+        }
+
+        const uint8_t stored_active = (uint8_t)flash_data->ActiveProgramSlot;
+        if (stored_active < MAX_PROGRAMS &&
+            Stored_Programs[stored_active].ValidMarker == PROGRAM_VALID_MARKER) {
+            Active_Program_Slot = stored_active;
+        } else {
+            Active_Program_Slot = NO_PROGRAM_SLOT;
+        }
+        Working_Program_Slot = Active_Program_Slot;
         Sanitize_Settings();
+        return;
+    }
+
+    /* Migrate the former single-profile version into working settings and C1.
+     * The upgrade is persisted on the next explicit save, avoiding a Flash
+     * erase during boot.
+     */
+    const Legacy_Flash_Data_t *legacy =
+        (const Legacy_Flash_Data_t *)FLASH_STORAGE_ADDR;
+    const bool legacy_header_valid =
+        (legacy->MagicWord == FLASH_MAGIC_WORD) &&
+        (legacy->Version == FLASH_LEGACY_VERSION) &&
+        (legacy->TotalIntervals >= 1U) &&
+        (legacy->TotalIntervals <= MAX_INTERVALS);
+    const uint32_t legacy_checksum = Flash_Checksum_Bytes(
+        legacy, offsetof(Legacy_Flash_Data_t, Checksum));
+
+    memset(Stored_Programs, 0, sizeof(Stored_Programs));
+    if (legacy_header_valid && legacy->Checksum == legacy_checksum) {
+        Total_Intervals = (uint8_t)legacy->TotalIntervals;
+        memcpy(Intervals, legacy->Intervals, sizeof(Intervals));
+        Sanitize_Settings();
+
+        Stored_Programs[0].ValidMarker = PROGRAM_VALID_MARKER;
+        Stored_Programs[0].TotalIntervals = (uint32_t)Total_Intervals;
+        memcpy(Stored_Programs[0].Intervals, Intervals, sizeof(Intervals));
+        Active_Program_Slot = 0U;
+        Working_Program_Slot = 0U;
     } else {
         Init_Default_Intervals();
+        Active_Program_Slot = NO_PROGRAM_SLOT;
+        Working_Program_Slot = NO_PROGRAM_SLOT;
     }
 }
 
